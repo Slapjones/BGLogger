@@ -1,0 +1,16 @@
+node_modules/
+.env
+.DS_Store
+dist/
+build/
+*.log
+*.zip
+*.rar
+/packager/
+.release/
+.pkgmeta
+*.bak
+*.tmp
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,9 @@
+## Interface: 110105
+## Title: BGLogger
+## Notes: Record of battleground statistics for export
+## Author: Slapjones
+## Version: 0.2
+## SavedVariables: BGLoggerDB
+
+BGLogger.lua
+BGLogger_Debug.lua
