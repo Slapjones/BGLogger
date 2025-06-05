@@ -66,13 +66,34 @@ end
 function GenerateDataHash(battlegroundMetadata, playerList)
     Debug("GenerateDataHash called with " .. #playerList .. " players")
     
+    -- Normalize string function to handle special characters
+    local function normalizeString(str)
+        if not str then return "" end
+        str = tostring(str)
+        
+        -- Replace all non-ASCII characters with underscore for consistency
+        local result = ""
+        for i = 1, #str do
+            local byte = string.byte(str, i)
+            if byte <= 127 then
+                -- Keep ASCII characters as-is
+                result = result .. string.char(byte)
+            else
+                -- Replace any non-ASCII character with underscore
+                result = result .. "_"
+            end
+        end
+        
+        return result
+    end
+    
     -- Create simple string from key data
     local parts = {}
     
-    -- Add battleground info
-    table.insert(parts, battlegroundMetadata.battleground or "")
+    -- Add battleground info (normalize battleground name)
+    table.insert(parts, normalizeString(battlegroundMetadata.battleground or ""))
     table.insert(parts, tostring(battlegroundMetadata.duration or 0))
-    table.insert(parts, battlegroundMetadata.winner or "")
+    table.insert(parts, normalizeString(battlegroundMetadata.winner or ""))
     
     -- Sort players by name for consistency
     local sortedPlayers = {}
@@ -81,13 +102,15 @@ function GenerateDataHash(battlegroundMetadata, playerList)
     end
     
     table.sort(sortedPlayers, function(a, b)
-        return (a.name or "") < (b.name or "")
+        local nameA = normalizeString(a.name or "")
+        local nameB = normalizeString(b.name or "")
+        return nameA < nameB
     end)
     
     -- Add player data
     for _, player in ipairs(sortedPlayers) do
-        local playerStr = (player.name or "") .. "|" .. 
-                         (player.realm or "") .. "|" .. 
+        local playerStr = normalizeString(player.name or "") .. "|" .. 
+                         normalizeString(player.realm or "") .. "|" .. 
                          tostring(player.damage or 0) .. "|" .. 
                          tostring(player.healing or 0)
         table.insert(parts, playerStr)
@@ -128,44 +151,6 @@ local function ExtractBattlegroundMetadata(data)
         type = data.type or "non-rated",
         date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ")
     }
-end
-
--- Debug function to show hash components
-function DebugHashComponents(key)
-    if not BGLoggerDB[key] then
-        Debug("No data found for key: " .. tostring(key))
-        return
-    end
-    
-    local data = BGLoggerDB[key]
-    local metadata = ExtractBattlegroundMetadata(data)
-    local players = data.stats or {}
-    
-    Debug("=== Hash Components Debug ===")
-    Debug("Battleground: " .. metadata.battleground)
-    Debug("Duration: " .. metadata.duration)
-    Debug("Winner: " .. metadata.winner)
-    Debug("Type: " .. metadata.type)
-    Debug("Date: " .. metadata.date)
-    Debug("Player count: " .. #players)
-    
-    -- Show first few players for verification
-    for i = 1, math.min(3, #players) do
-        local p = players[i]
-        Debug("Player " .. i .. ": " .. (p.name or "?") .. "-" .. (p.realm or "?") .. 
-              " (" .. (p.damage or 0) .. " dmg, " .. (p.healing or 0) .. " heal)")
-    end
-    
-    local hash, hashMeta = GenerateDataHash(metadata, players)
-    Debug("Generated hash: " .. hash)
-    Debug("Hash metadata: " .. TableToJSON(hashMeta))
-    
-    if data.integrity and data.integrity.hash then
-        Debug("Stored hash: " .. data.integrity.hash)
-        Debug("Hashes match: " .. tostring(hash == data.integrity.hash))
-    else
-        Debug("No stored hash found")
-    end
 end
 
 -- Enhanced battleground detection function
@@ -607,9 +592,8 @@ function ExportBattleground(key)
     end
     
     local mapName = data.battlegroundName or "Unknown Battleground"
-    local normalizedMapName = NormalizeBattlegroundName(mapName)
     
-    -- Process players (same as before)
+    -- Process players and convert numbers to strings to preserve precision
     local exportPlayers = {}
     for _, player in ipairs(data.stats or {}) do
         table.insert(exportPlayers, {
@@ -618,8 +602,8 @@ function ExportBattleground(key)
             faction = player.faction or player.side,
             class = player.class,
             spec = player.spec,
-            damage = player.damage or player.dmg or 0,
-            healing = player.healing or player.heal or 0,
+            damage = tostring(player.damage or player.dmg or 0),  -- Convert to string
+            healing = tostring(player.healing or player.heal or 0), -- Convert to string
             kills = player.kills or player.killingBlows or player.kb or 0,
             deaths = player.deaths or 0,
             honorableKills = player.honorableKills or 0,
@@ -629,14 +613,12 @@ function ExportBattleground(key)
     
     -- Convert to website-compatible JSON format
     local exportData = {
-        battleground = normalizedMapName,
+        battleground = mapName,
         date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ"),
         type = data.type or "non-rated",
-        duration = data.duration or 0,
+        duration = tostring(data.duration or 0),
         winner = data.winner or "",
         players = exportPlayers,
-        
-        -- USE PRE-GENERATED INTEGRITY DATA
         integrity = data.integrity
     }
     
@@ -654,13 +636,13 @@ function ExportBattleground(key)
     
     -- Create filename
     local filename = string.format("BGLogger_%s_%s.json", 
-        normalizedMapName:gsub("%s+", "_"):gsub("[^%w_]", ""),
+        mapName:gsub("%s+", "_"):gsub("[^%w_]", ""),
         date("!%Y%m%d_%H%M%S")
     )
     
-    SaveJSONToFile(jsonString, filename)
+    ShowJSONExportFrame(jsonString, filename)
     
-    print("|cff00ffffBGLogger:|r Exported " .. normalizedMapName .. " with verified integrity hash")
+    print("|cff00ffffBGLogger:|r Exported " .. mapName .. " with verified integrity hash")
 end
 
 -- Convert Lua table to JSON string
@@ -729,12 +711,6 @@ function TableToJSON(tbl, indent)
     end
 end
 
--- Save JSON to file
-function SaveJSONToFile(jsonString, filename)
-    -- WoW doesn't allow direct file writing, so we'll display it for copy/paste
-    ShowJSONExportFrame(jsonString, filename)
-end
-
 -- Show JSON export frame with read-only text
 function ShowJSONExportFrame(jsonString, filename)
     Debug("ShowJSONExportFrame called with " .. #jsonString .. " characters")
@@ -764,7 +740,7 @@ function ShowJSONExportFrame(jsonString, filename)
         local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         title:SetPoint("TOP", 0, -16)
         title:SetText("Export Battleground Data")
-        
+
         -- Instructions
         local instructions = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         instructions:SetPoint("TOP", title, "BOTTOM", 0, -10)
@@ -1466,6 +1442,72 @@ local function SetMinimapButtonShown(show)
         end
         BGLoggerDB.minimapButton = false
     end
+end
+
+function DebugExportVsHash(key)
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. tostring(key))
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    print("=== DEBUGGING HASH MISMATCH ===")
+    
+    -- Show stored hash
+    if data.integrity and data.integrity.hash then
+        print("Stored hash: " .. data.integrity.hash)
+    else
+        print("No stored hash found!")
+        return
+    end
+    
+    -- Recreate the exact hash generation process
+    local battlegroundMetadata = {
+        battleground = data.battlegroundName or "Unknown Battleground",
+        duration = data.duration or 0,
+        winner = data.winner or "",
+        type = data.type or "non-rated",
+        date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ")
+    }
+    
+    print("BG Metadata:")
+    print("  battleground: '" .. battlegroundMetadata.battleground .. "'")
+    print("  duration: " .. battlegroundMetadata.duration)
+    print("  winner: '" .. battlegroundMetadata.winner .. "'")
+    
+    -- Show what the export will send vs what hash used
+    print("\nPlayer data comparison (first 3 players):")
+    for i = 1, math.min(3, #(data.stats or {})) do
+        local player = data.stats[i]
+        print("Player " .. i .. ":")
+        print("  name: '" .. (player.name or "") .. "'")
+        print("  realm: '" .. (player.realm or "") .. "'")
+        print("  damage field: " .. (player.damage or "nil"))
+        print("  dmg field: " .. (player.dmg or "nil"))
+        print("  healing field: " .. (player.healing or "nil"))
+        print("  heal field: " .. (player.heal or "nil"))
+        
+        -- Show what export will use
+        local exportDamage = player.damage or player.dmg or 0
+        local exportHealing = player.healing or player.heal or 0
+        print("  export damage: " .. tostring(exportDamage))
+        print("  export healing: " .. tostring(exportHealing))
+        
+        -- Show what hash used (assuming it only checks player.damage/healing)
+        print("  hash damage: " .. tostring(player.damage or 0))
+        print("  hash healing: " .. tostring(player.healing or 0))
+        
+        if exportDamage ~= (player.damage or 0) or exportHealing ~= (player.healing or 0) then
+            print("  *** MISMATCH DETECTED! ***")
+        end
+    end
+    
+    -- Regenerate hash with current data
+    local newHash, newMetadata = GenerateDataHash(battlegroundMetadata, data.stats or {})
+    print("\nHash comparison:")
+    print("  Original: " .. data.integrity.hash)
+    print("  Regenerated: " .. newHash)
+    print("  Match: " .. tostring(data.integrity.hash == newHash))
 end
 
 ---------------------------------------------------------------------

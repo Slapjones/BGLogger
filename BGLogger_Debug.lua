@@ -63,6 +63,127 @@ local function DebugHashComponents(key)
     end
 end
 
+-- Debug function to show hash components
+function DebugHashComponents(key)
+    if not BGLoggerDB[key] then
+        Debug("No data found for key: " .. tostring(key))
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    local metadata = ExtractBattlegroundMetadata(data)
+    local players = data.stats or {}
+    
+    Debug("=== Hash Components Debug ===")
+    Debug("Battleground: " .. metadata.battleground)
+    Debug("Duration: " .. metadata.duration)
+    Debug("Winner: " .. metadata.winner)
+    Debug("Type: " .. metadata.type)
+    Debug("Date: " .. metadata.date)
+    Debug("Player count: " .. #players)
+    
+    -- Show first few players for verification
+    for i = 1, math.min(3, #players) do
+        local p = players[i]
+        Debug("Player " .. i .. ": " .. (p.name or "?") .. "-" .. (p.realm or "?") .. 
+              " (" .. (p.damage or 0) .. " dmg, " .. (p.healing or 0) .. " heal)")
+    end
+    
+    local hash, hashMeta = GenerateDataHash(metadata, players)
+    Debug("Generated hash: " .. hash)
+    Debug("Hash metadata: " .. TableToJSON(hashMeta))
+    
+    if data.integrity and data.integrity.hash then
+        Debug("Stored hash: " .. data.integrity.hash)
+        Debug("Hashes match: " .. tostring(hash == data.integrity.hash))
+    else
+        Debug("No stored hash found")
+    end
+end
+
+function DebugJSONOutput(key)
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. tostring(key))
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    local mapName = data.battlegroundName or "Unknown Battleground"
+    
+    -- Process players exactly like export does
+    local exportPlayers = {}
+    for _, player in ipairs(data.stats or {}) do
+        table.insert(exportPlayers, {
+            name = player.name,
+            realm = player.realm,
+            faction = player.faction or player.side,
+            class = player.class,
+            spec = player.spec,
+            damage = tostring(player.damage or player.dmg or 0),
+            healing = tostring(player.healing or player.heal or 0),
+            kills = player.kills or player.killingBlows or player.kb or 0,
+            deaths = player.deaths or 0,
+            honorableKills = player.honorableKills or 0,
+            objectives = 0
+        })
+    end
+    
+    -- Create export data exactly like export does (without normalization for now)
+    local exportData = {
+        battleground = mapName,  -- Use raw map name
+        date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ"),
+        type = data.type or "non-rated",
+        duration = tostring(data.duration or 0),
+        winner = data.winner or "",
+        players = exportPlayers,
+        integrity = data.integrity
+    }
+    
+    print("=== JSON DEBUG ===")
+    print("Export data sample:")
+    print("  battleground: '" .. exportData.battleground .. "' (type: " .. type(exportData.battleground) .. ")")
+    print("  duration: '" .. exportData.duration .. "' (type: " .. type(exportData.duration) .. ")")
+    print("  winner: '" .. exportData.winner .. "' (type: " .. type(exportData.winner) .. ")")
+    
+    if #exportPlayers > 0 then
+        local p1 = exportPlayers[1]
+        print("  player1.damage: '" .. p1.damage .. "' (type: " .. type(p1.damage) .. ")")
+        print("  player1.healing: '" .. p1.healing .. "' (type: " .. type(p1.healing) .. ")")
+        print("  player1.kills: " .. p1.kills .. " (type: " .. type(p1.kills) .. ")")
+    end
+    
+    -- Generate JSON and check for issues
+    local success, jsonString = pcall(TableToJSON, exportData)
+    
+    if success then
+        print("JSON generation: SUCCESS")
+        print("JSON length: " .. #jsonString)
+        
+        -- Show a small sample of the JSON around the first player's damage
+        local damagePattern = '"damage":%s*"?([%d%.%-e+]*)"?'
+        local firstDamage = jsonString:match(damagePattern)
+        if firstDamage then
+            print("First damage in JSON: '" .. firstDamage .. "'")
+        end
+        
+        local healingPattern = '"healing":%s*"?([%d%.%-e+]*)"?'
+        local firstHealing = jsonString:match(healingPattern)
+        if firstHealing then
+            print("First healing in JSON: '" .. firstHealing .. "'")
+        end
+        
+        -- Check if integrity hash is included
+        if jsonString:find('"integrity"') then
+            print("Integrity hash included in JSON: YES")
+        else
+            print("Integrity hash included in JSON: NO - THIS IS THE PROBLEM!")
+        end
+        
+    else
+        print("JSON generation: FAILED - " .. tostring(jsonString))
+    end
+end
+
 ---------------------------------------------------------------------
 -- Debug Command Handlers
 ---------------------------------------------------------------------
@@ -251,7 +372,334 @@ local function HandleDebugCommand(msg)
                 end
             end
         end
+    elseif cmd == "debughash" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug debughash <battleground_key>")
+        return
+    end
+    DebugExportVsHash(key)    
+    elseif cmd == "debugjson" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug debugjson <battleground_key>")
+        return
+    end
+    DebugJSONOutput(key)
+    elseif cmd == "hashstring" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug hashstring <battleground_key>")
+        return
+    end
+    
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. key)
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    local metadata = {
+        battleground = data.battlegroundName or "Unknown Battleground",
+        duration = data.duration or 0,
+        winner = data.winner or ""
+    }
+    
+    -- Use the EXACT same normalization function as GenerateDataHash
+    local function normalizeString(str)
+        if not str then return "" end
+        str = tostring(str)
         
+        -- Replace all non-ASCII characters with underscore for consistency
+        local result = ""
+        for i = 1, #str do
+            local byte = string.byte(str, i)
+            if byte <= 127 then
+                -- Keep ASCII characters as-is
+                result = result .. string.char(byte)
+            else
+                -- Replace any non-ASCII character with underscore
+                result = result .. "_"
+            end
+        end
+        
+        return result
+    end
+    
+    -- Recreate the exact hash string using the SAME logic as GenerateDataHash
+    local parts = {}
+    
+    -- Add battleground info (normalize battleground name)
+    table.insert(parts, normalizeString(metadata.battleground or ""))
+    table.insert(parts, tostring(metadata.duration or 0))
+    table.insert(parts, normalizeString(metadata.winner or ""))
+    
+    -- Sort players by name for consistency
+    local sortedPlayers = {}
+    for _, player in ipairs(data.stats or {}) do
+        table.insert(sortedPlayers, player)
+    end
+    
+    table.sort(sortedPlayers, function(a, b)
+        local nameA = normalizeString(a.name or "")
+        local nameB = normalizeString(b.name or "")
+        return nameA < nameB
+    end)
+    
+    -- Add player data
+    for _, player in ipairs(sortedPlayers) do
+        local playerStr = normalizeString(player.name or "") .. "|" .. 
+                         normalizeString(player.realm or "") .. "|" .. 
+                         tostring(player.damage or 0) .. "|" .. 
+                         tostring(player.healing or 0)
+        table.insert(parts, playerStr)
+    end
+    
+    local hashString = table.concat(parts, "||")
+    print("=== FULL HASH STRING (WITH NORMALIZATION) ===")
+    print("Length: " .. #hashString)
+    
+    -- Output in 200-character chunks to avoid chat line limits
+    local pos = 1
+    local chunkNum = 1
+    while pos <= #hashString do
+        local chunk = hashString:sub(pos, pos + 199)
+        print("Chunk " .. chunkNum .. ": " .. chunk)
+        pos = pos + 200
+        chunkNum = chunkNum + 1
+    end
+    print("=== END HASH STRING ===")
+    elseif cmd == "hashparts" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug hashparts <battleground_key>")
+        return
+    end
+    
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. key)
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    local metadata = {
+        battleground = data.battlegroundName or "Unknown Battleground",
+        duration = data.duration or 0,
+        winner = data.winner or ""
+    }
+    
+    print("=== BATTLEGROUND METADATA ===")
+    print("Battleground: '" .. metadata.battleground .. "' (length: " .. #metadata.battleground .. ")")
+    print("Duration: '" .. tostring(metadata.duration) .. "' (length: " .. #tostring(metadata.duration) .. ")")
+    print("Winner: '" .. metadata.winner .. "' (length: " .. #metadata.winner .. ")")
+    
+    local sortedPlayers = {}
+    for _, player in ipairs(data.stats or {}) do
+        table.insert(sortedPlayers, player)
+    end
+    
+    table.sort(sortedPlayers, function(a, b)
+        return (a.name or "") < (b.name or "")
+    end)
+    
+    print("=== PLAYER COUNT ===")
+    print("Total players: " .. #sortedPlayers)
+    
+    print("=== FIRST 3 PLAYERS ===")
+    for i = 1, math.min(3, #sortedPlayers) do
+        local player = sortedPlayers[i]
+        local playerStr = (player.name or "") .. "|" .. 
+                         (player.realm or "") .. "|" .. 
+                         tostring(player.damage or 0) .. "|" .. 
+                         tostring(player.healing or 0)
+        print("Player " .. i .. ": '" .. playerStr .. "' (length: " .. #playerStr .. ")")
+    end
+    elseif cmd == "findchars" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug findchars <battleground_key>")
+        return
+    end
+    
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. key)
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    
+    -- Function to show problematic characters
+    local function analyzeString(str, label)
+        if not str then return end
+        str = tostring(str)
+        
+        local hasSpecial = false
+        for i = 1, #str do
+            local byte = string.byte(str, i)
+            if byte > 127 then -- Non-ASCII character
+                if not hasSpecial then
+                    print("Special chars in " .. label .. ":")
+                    hasSpecial = true
+                end
+                local char = string.sub(str, i, i)
+                print("  Position " .. i .. ": '" .. char .. "' (byte: " .. byte .. ")")
+            end
+        end
+        
+        if hasSpecial then
+            print("  Full string: '" .. str .. "' (length: " .. #str .. ")")
+        end
+    end
+    
+    -- Check battleground metadata
+    analyzeString(data.battlegroundName, "battleground name")
+    analyzeString(data.winner, "winner")
+    
+    -- Check first 10 players for special characters
+    print("=== CHECKING PLAYER NAMES/REALMS ===")
+    local count = 0
+    for _, player in ipairs(data.stats or {}) do
+        analyzeString(player.name, "player name")
+        analyzeString(player.realm, "realm")
+        count = count + 1
+        if count >= 10 then break end
+    end
+    elseif cmd == "checkpipes" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug checkpipes <battleground_key>")
+        return
+    end
+    
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. key)
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    local metadata = {
+        battleground = data.battlegroundName or "Unknown Battleground",
+        duration = data.duration or 0,
+        winner = data.winner or ""
+    }
+    
+    -- Create parts exactly like hash generation
+    local parts = {}
+    table.insert(parts, metadata.battleground)
+    table.insert(parts, tostring(metadata.duration))
+    table.insert(parts, metadata.winner)
+    
+    -- Add just first player for testing
+    if data.stats and #data.stats > 0 then
+        local player = data.stats[1]
+        local playerStr = (player.name or "") .. "|" .. 
+                         (player.realm or "") .. "|" .. 
+                         tostring(player.damage or 0) .. "|" .. 
+                         tostring(player.healing or 0)
+        table.insert(parts, playerStr)
+    end
+    
+    print("=== PIPE SEPARATOR TEST ===")
+    print("Parts count: " .. #parts)
+    for i, part in ipairs(parts) do
+        print("Part " .. i .. ": '" .. part .. "'")
+    end
+    
+    local dataString = table.concat(parts, "||")
+    print("Joined string length: " .. #dataString)
+    print("Full string: '" .. dataString .. "'")
+    
+    -- Check for double pipes specifically
+    local doublePipeCount = 0
+    local singlePipeCount = 0
+    local pos = 1
+    while pos <= #dataString do
+        if pos < #dataString and dataString:sub(pos, pos+1) == "||" then
+            doublePipeCount = doublePipeCount + 1
+            pos = pos + 2
+        elseif dataString:sub(pos, pos) == "|" then
+            singlePipeCount = singlePipeCount + 1
+            pos = pos + 1
+        else
+            pos = pos + 1
+        end
+    end
+    
+    print("Double pipes (||): " .. doublePipeCount)
+    print("Single pipes (|): " .. singlePipeCount)
+    elseif cmd == "testnorm" then
+    local function normalizeString(str)
+        if not str then return "" end
+        str = tostring(str)
+        
+        local result = ""
+        for i = 1, #str do
+            local byte = string.byte(str, i)
+            if byte <= 127 then
+                result = result .. string.char(byte)
+            else
+                result = result .. "_"
+            end
+        end
+        
+        return result
+    end
+    
+    local testName = "Kìllah"
+    local normalized = normalizeString(testName)
+    print("Original: '" .. testName .. "' (length: " .. #testName .. ")")
+    print("Normalized: '" .. normalized .. "' (length: " .. #normalized .. ")")
+    elseif cmd == "realhash" then
+    local key = param
+    if not key or key == "" then
+        print("Usage: /bgdebug realhash <battleground_key>")
+        return
+    end
+    
+    if not BGLoggerDB[key] then
+        print("No data found for key: " .. key)
+        return
+    end
+    
+    local data = BGLoggerDB[key]
+    local metadata = {
+        battleground = data.battlegroundName or "Unknown Battleground",
+        duration = data.duration or 0,
+        winner = data.winner or "",
+        type = data.type or "non-rated",
+        date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ")
+    }
+    
+    print("=== REAL HASH GENERATION TEST ===")
+    
+    -- Call your actual GenerateDataHash function
+    local hash, hashMeta = GenerateDataHash(metadata, data.stats or {})
+    
+    print("Generated hash: " .. hash)
+    print("Stored hash: " .. (data.integrity and data.integrity.hash or "none"))
+    print("Match: " .. tostring(hash == (data.integrity and data.integrity.hash or "")))
+    
+    -- Also test with just first player to see normalized output
+    if data.stats and #data.stats > 0 then
+        local testPlayer = data.stats[1]
+        print("First player raw: " .. (testPlayer.name or ""))
+        -- Show what normalization produces
+        local function normalizeString(str)
+            if not str then return "" end
+            str = tostring(str)
+            local result = ""
+            for i = 1, #str do
+                local byte = string.byte(str, i)
+                if byte <= 127 then
+                    result = result .. string.char(byte)
+                else
+                    result = result .. "_"
+                end
+            end
+            return result
+        end
+        print("First player normalized: " .. normalizeString(testPlayer.name or ""))
+    end
     else
         print("BGLogger debug commands:")
         print("  on, off - toggle debug mode")
@@ -328,7 +776,7 @@ function BGLoggerDebug.CreateTestBattleground(bgType)
     
     -- Predefined battleground options with reliable data
     local battlegrounds = {
-        wsg = { mapID = 489, name = "Warsong Gulch" },
+        wsg = { mapID = 1339, name = "Warsong Gulch" },
         ab = { mapID = 529, name = "Arathi Basin" },
         av = { mapID = 30, name = "Alterac Valley" },
         eots = { mapID = 566, name = "Eye of the Storm" },
