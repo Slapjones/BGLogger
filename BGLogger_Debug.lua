@@ -700,13 +700,85 @@ local function HandleDebugCommand(msg)
         end
         print("First player normalized: " .. normalizeString(testPlayer.name or ""))
     end
+    elseif cmd == "timing" then
+        if _G.DebugTimingStatus then
+            _G.DebugTimingStatus()
+        else
+            print("DebugTimingStatus function not available")
+        end
+        
+    elseif cmd == "bgtype" then
+        if _G.DebugBGTypeDetection then
+            _G.DebugBGTypeDetection()
+        else
+            print("DebugBGTypeDetection function not available")
+        end
+        
+    elseif cmd == "tracking" then
+        if _G.DebugPlayerTracking then
+            _G.DebugPlayerTracking()
+        else
+            print("DebugPlayerTracking function not available")
+        end
+        
+    elseif cmd == "afktest" then
+        if _G.DebugAFKerDetection then
+            _G.DebugAFKerDetection()
+        else
+            print("DebugAFKerDetection function not available")
+        end
+        
+    elseif cmd == "resettracking" then
+        if _G.ResetPlayerTracking then
+            _G.ResetPlayerTracking()
+        else
+            print("ResetPlayerTracking function not available")
+        end
+        
+    elseif cmd == "matchstart" then
+        if _G.DebugMatchStart then
+            _G.DebugMatchStart()
+        else
+            print("DebugMatchStart function not available")
+        end
+        
+    elseif cmd == "scoredata" then
+        if _G.DebugScoreboardData then
+            _G.DebugScoreboardData()
+        else
+            print("DebugScoreboardData function not available")
+        end
+        
+    elseif cmd == "collectdata" then
+        if _G.DebugCollectScoreData then
+            _G.DebugCollectScoreData()
+        else
+            print("DebugCollectScoreData function not available")
+        end
+        
+    elseif cmd == "trackstatus" then
+        if _G.CheckTrackingStatus then
+            _G.CheckTrackingStatus()
+        else
+            print("CheckTrackingStatus function not available")
+        end
+        
     else
         print("BGLogger debug commands:")
         print("  on, off - toggle debug mode")
         print("  status - show current BG status") 
         print("  dump - show database contents")
-        print("  testbg [type] - create test battleground (wsg, ab, av, eots, tp, bg)")
+        print("  testbg [type] - create test battleground (wsg, ab, av, eots, tp, bg, brawl)")
         print("  forcesave - force save current BG")
+        print("  timing - show real-time timing status")
+        print("  bgtype - debug BG type detection")
+        print("  tracking - debug player participation tracking")
+        print("  afktest - comprehensive AFKer detection test")
+        print("  resettracking - reset all player tracking data")
+        print("  matchstart - debug match start detection")
+        print("  scoredata - show raw scoreboard data fields")
+        print("  collectdata - test CollectScoreData function")
+        print("  trackstatus - show current tracking state")
         print("  testhash - test hash generation")
         print("  checkhash [key] - check hash for entry")
         print("  hashcomponents [key] - debug hash components")
@@ -781,7 +853,8 @@ function BGLoggerDebug.CreateTestBattleground(bgType)
         av = { mapID = 30, name = "Alterac Valley" },
         eots = { mapID = 566, name = "Eye of the Storm" },
         tp = { mapID = 726, name = "Twin Peaks" },
-        bg = { mapID = 761, name = "Battle for Gilneas" }
+        bg = { mapID = 761, name = "Battle for Gilneas" },
+        brawl = { mapID = 1339, name = "Warsong Gulch" } -- Brawl using WSG map
     }
     
     local selectedBG = battlegrounds[bgType] or battlegrounds.wsg
@@ -791,6 +864,13 @@ function BGLoggerDebug.CreateTestBattleground(bgType)
     
     local key = mapID.."_"..date("!%Y%m%d_%H%M%S")
     
+    -- Determine the BG type based on test type
+    local testBGType = "non-rated"
+    if bgType == "brawl" then
+        testBGType = "brawl"
+        mapName = mapName .. " Brawl" -- Add brawl suffix to make it clear
+    end
+    
     -- Create enhanced battleground data
     BGLoggerDB[key] = {
         mapID = mapID,
@@ -799,7 +879,7 @@ function BGLoggerDebug.CreateTestBattleground(bgType)
         battlegroundName = mapName,
         duration = duration,
         winner = "Alliance", -- Fixed winner for consistent testing
-        type = "non-rated",
+        type = testBGType,
         startTime = _G.bgStartTime,
         endTime = GetTime(),
         dateISO = date("!%Y-%m-%dT%H:%M:%SZ")
@@ -811,7 +891,7 @@ function BGLoggerDebug.CreateTestBattleground(bgType)
             battleground = mapName,
             duration = duration,
             winner = "Alliance",
-            type = "non-rated",
+            type = testBGType,
             date = BGLoggerDB[key].dateISO
         }
         
