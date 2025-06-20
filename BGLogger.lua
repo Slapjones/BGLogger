@@ -2518,6 +2518,30 @@ local function CreateWindow()
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", f.StopMovingOrSizing)
     
+    -- Enable escape key to close window
+    f:SetPropagateKeyboardInput(true)
+    f:EnableKeyboard(true)
+    f:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            self:Hide()
+            -- Stop the key from propagating further
+            self:SetPropagateKeyboardInput(false)
+        else
+            -- Let other keys propagate normally
+            self:SetPropagateKeyboardInput(true)
+        end
+    end)
+    
+    -- Ensure keyboard input is enabled when window is shown
+    f:SetScript("OnShow", function(self)
+        self:EnableKeyboard(true)
+    end)
+    
+    -- Disable keyboard input when window is hidden
+    f:SetScript("OnHide", function(self)
+        self:EnableKeyboard(false)
+    end)
+    
     -- Add close button
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", -6, -6)
