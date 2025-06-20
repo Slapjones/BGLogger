@@ -6,8 +6,8 @@ BGLoggerDB = BGLoggerDB or {}
 -- Config / globals
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
-local LINE_HEIGHT            = 14
-local WIN_W, WIN_H           = 900, 750
+local LINE_HEIGHT            = 13
+local WIN_W, WIN_H           = 1400, 800
 local insideBG, matchSaved   = false, false
 local bgStartTime            = 0
 local MIN_BG_TIME            = 30  -- Minimum seconds in BG before saving
@@ -2127,10 +2127,10 @@ end
 local function MakeDetailLine(parent, i)
     local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     fs:SetPoint("TOPLEFT", 0, -(i-1)*LINE_HEIGHT)
-    fs:SetWidth(WIN_W-60)
+    fs:SetWidth(WIN_W-40)
     
-    -- Use a monospace font for better column alignment
-    fs:SetFont("Fonts\\ARIALN.TTF", 14, "OUTLINE")
+    -- Use a smaller monospace font for better column alignment
+    fs:SetFont("Fonts\\ARIALN.TTF", 11, "OUTLINE")
     
     DetailLines[i] = fs
     return fs
@@ -2140,7 +2140,7 @@ local function MakeListButton(parent, i)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     b:SetHeight(LINE_HEIGHT*2)  -- Make buttons bigger for easier clicking
     b:SetPoint("TOPLEFT", 0, -(i-1)*(LINE_HEIGHT*2 + 2))  -- Add spacing between buttons
-    b:SetPoint("RIGHT", parent, "RIGHT", -20, 0)  -- Don't extend all the way to the right
+    b:SetPoint("RIGHT", parent, "RIGHT", -30, 0)  -- More padding for wider window
     b:SetText("Loading...")  -- Default text
     b.bg = b:CreateTexture(nil, "BACKGROUND")
     b.bg:SetAllPoints()
@@ -2331,19 +2331,19 @@ function ShowDetail(key)
     headerInfo:SetText(bgInfo)
     headerInfo:Show()
     
-    -- Add separator
+    -- Add separator (wider for new layout)
     local separator1 = DetailLines[2] or MakeDetailLine(WINDOW.detailContent, 2)
-    separator1:SetText(string.rep("=", 105))
+    separator1:SetText(string.rep("=", 150))
     separator1:Show()
     
-    -- UPDATED: Column headers with backfill status
+    -- Enhanced column headers with better spacing for wider window
     local header = DetailLines[3] or MakeDetailLine(WINDOW.detailContent, 3)
-    header:SetText("Player Name            Realm          Class       Spec         Faction   Damage    Healing   Kills Deaths HK  Status")
+    header:SetText("Player Name                 Realm             Class        Spec              Faction      Damage      Healing     K  D   HK   Status")
     header:Show()
     
-    -- Add separator line
+    -- Add separator line (wider for new layout)
     local separator2 = DetailLines[4] or MakeDetailLine(WINDOW.detailContent, 4)
-    separator2:SetText(string.rep("-", 125))
+    separator2:SetText(string.rep("-", 150))
     separator2:Show()
     
     -- Get regular players (all players in stats since AFKers aren't in the final stats)
@@ -2379,15 +2379,15 @@ function ShowDetail(key)
             status = "OK"   -- Normal participation
         end
         
-        -- Truncate long names/realms to fit
-        local displayName = string.sub(row.name or "Unknown", 1, 18)
-        local displayRealm = string.sub(realm, 1, 12)
-        local displayClass = string.sub(class, 1, 9)
-        local displaySpec = string.sub(spec, 1, 10)
-        local displayFaction = string.sub(faction, 1, 8)
+        -- Truncate long names/realms with more generous spacing for wider window
+        local displayName = string.sub(row.name or "Unknown", 1, 25)
+        local displayRealm = string.sub(realm, 1, 15)
+        local displayClass = string.sub(class, 1, 11)
+        local displaySpec = string.sub(spec, 1, 16)
+        local displayFaction = string.sub(faction, 1, 10)
         
-        -- UPDATED: Show kills, deaths, and backfill status
-        fs:SetFormattedText("%-18s %-12s %-9s %-10s %-8s %8s %8s %5d %6d %3d %6s",
+        -- Enhanced formatting with better column spacing for wider window
+        fs:SetFormattedText("%-25s %-15s %-11s %-16s %-10s %10s %10s %2d %2d %4d %6s",
             displayName,
             displayRealm,
             displayClass,
@@ -2413,7 +2413,7 @@ function ShowDetail(key)
     
     -- Add summary footer for regular players
     local summaryLine = DetailLines[#regularPlayers+6] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+6)
-    summaryLine:SetText(string.rep("-", 125))
+    summaryLine:SetText(string.rep("-", 150))
     summaryLine:Show()
     
     local totalLine = DetailLines[#regularPlayers+7] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+7)
@@ -2431,8 +2431,8 @@ function ShowDetail(key)
         if row.isBackfill then backfillCount = backfillCount + 1 end
     end
     
-    -- Show totals for regular players
-    totalLine:SetFormattedText("TOTALS (%d active players)%42s %8s %8s %5d %6d",
+    -- Show totals for regular players with better alignment
+    totalLine:SetFormattedText("TOTALS (%d active players)%66s %10s %10s %2d %2d",
         #regularPlayers,
         "",
         totalDamage >= 1000000 and string.format("%.1fM", totalDamage/1000000) or 
