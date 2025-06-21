@@ -6,7 +6,7 @@ BGLoggerDB = BGLoggerDB or {}
 -- Config / globals
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
-local LINE_HEIGHT            = 13
+local LINE_HEIGHT            = 18
 local WIN_W, WIN_H           = 1400, 800
 local insideBG, matchSaved   = false, false
 local bgStartTime            = 0
@@ -16,7 +16,13 @@ local GetWinner              = _G.GetBattlefieldWinner -- may be nil on some cli
 local DEBUG_MODE             = false -- Set to false for production, true for development
 local saveInProgress         = false
 local ALLOW_TEST_EXPORTS     = DEBUG_MODE
+-- 32-bit overflow detection constants
+local UINT32_LIMIT           = 4294967295  -- 32-bit unsigned integer limit
+local OVERFLOW_DETECTION_THRESHOLD = UINT32_LIMIT * 0.8  -- Detect when approaching overflow
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
+
+-- Overflow tracking timer
+local overflowTrackingTimer = nil
 
 ---------------------------------------------------------------------
 -- Simple Player List Tracking
@@ -25,7 +31,11 @@ local playerTracker = {
     initialPlayerList = {}, -- Players present at match start
     finalPlayerList = {},   -- Players present at match end (when we save)
     initialListCaptured = false,
-    battleHasBegun = false  -- Flag to track if we've seen the "battle has begun" message
+    battleHasBegun = false,  -- Flag to track if we've seen the "battle has begun" message
+    -- Overflow detection tracking
+    damageHealing = {},     -- Track damage/healing values over time
+    lastCheck = {},         -- Last recorded values for each player
+    overflowDetected = {}   -- Track detected overflows
 }
 
 ---------------------------------------------------------------------
@@ -81,6 +91,9 @@ local function ResetPlayerTracker()
         playerTracker.initialListCaptured = false
         playerTracker.battleHasBegun = false
         playerTracker.detectedAFKers = {}
+        playerTracker.damageHealing = {}
+        playerTracker.lastCheck = {}
+        playerTracker.overflowDetected = {}
         Debug("Player tracker reset for new battleground")
     else
         Debug("Skipping tracker reset - still in active battleground")
@@ -90,6 +103,173 @@ end
 -- Generate unique player key
 local function GetPlayerKey(name, realm)
     return (name or "Unknown") .. "-" .. (realm or "Unknown")
+end
+
+-- Format text to fit exactly in a fixed width, centered
+local function FixedWidthCenter(text, width)
+    text = tostring(text or "")
+    if #text > width then
+        text = string.sub(text, 1, width)
+    end
+    local padding = width - #text
+    local leftPad = math.floor(padding / 2)
+    local rightPad = padding - leftPad
+    return string.rep(" ", leftPad) .. text .. string.rep(" ", rightPad)
+end
+
+-- Format text to fit exactly in a fixed width, left-aligned
+local function FixedWidthLeft(text, width)
+    text = tostring(text or "")
+    if #text > width then
+        text = string.sub(text, 1, width)
+    end
+    return text .. string.rep(" ", width - #text)
+end
+
+-- Format text to fit exactly in a fixed width, right-aligned  
+local function FixedWidthRight(text, width)
+    text = tostring(text or "")
+    if #text > width then
+        text = string.sub(text, 1, width)
+    end
+    return string.rep(" ", width - #text) .. text
+end
+
+---------------------------------------------------------------------
+-- Overflow Detection Functions
+---------------------------------------------------------------------
+
+-- Track and detect 32-bit integer overflow for damage/healing
+local function TrackPlayerStats()
+    if not insideBG then return end
+    
+    local rows = GetNumBattlefieldScores()
+    if rows == 0 then return end
+    
+    Debug("Tracking stats for overflow detection: " .. rows .. " players")
+    
+    for i = 1, rows do
+        local success, s = pcall(C_PvP.GetScoreInfo, i)
+        if success and s and s.name then
+            local playerName, realmName = s.name, ""
+            
+            -- Get player key
+            if s.name:find("-") then
+                playerName, realmName = s.name:match("^(.+)-(.+)$")
+            else
+                realmName = GetRealmName() or "Unknown-Realm"
+            end
+            
+            local playerKey = GetPlayerKey(playerName, realmName)
+            local currentDamage = s.damageDone or s.damage or 0
+            local currentHealing = s.healingDone or s.healing or 0
+            
+            -- Initialize tracking for new players
+            if not playerTracker.lastCheck[playerKey] then
+                playerTracker.lastCheck[playerKey] = {
+                    damage = currentDamage,
+                    healing = currentHealing,
+                    timestamp = GetTime()
+                }
+                playerTracker.overflowDetected[playerKey] = {
+                    damageOverflows = 0,
+                    healingOverflows = 0
+                }
+            else
+                local lastData = playerTracker.lastCheck[playerKey]
+                local overflowData = playerTracker.overflowDetected[playerKey]
+                
+                -- Check for damage overflow (current value significantly lower than previous)
+                if currentDamage < lastData.damage and lastData.damage > OVERFLOW_DETECTION_THRESHOLD then
+                    Debug("OVERFLOW DETECTED: " .. playerKey .. " damage dropped from " .. lastData.damage .. " to " .. currentDamage)
+                    overflowData.damageOverflows = overflowData.damageOverflows + 1
+                end
+                
+                -- Check for healing overflow
+                if currentHealing < lastData.healing and lastData.healing > OVERFLOW_DETECTION_THRESHOLD then
+                    Debug("OVERFLOW DETECTED: " .. playerKey .. " healing dropped from " .. lastData.healing .. " to " .. currentHealing)
+                    overflowData.healingOverflows = overflowData.healingOverflows + 1
+                end
+                
+                -- Update tracking data
+                lastData.damage = currentDamage
+                lastData.healing = currentHealing
+                lastData.timestamp = GetTime()
+            end
+        end
+    end
+end
+
+-- Get corrected damage/healing values accounting for overflow
+local function GetCorrectedStats(playerKey, rawDamage, rawHealing)
+    local overflowData = playerTracker.overflowDetected[playerKey]
+    if not overflowData then
+        return rawDamage, rawHealing
+    end
+    
+    local correctedDamage = rawDamage + (overflowData.damageOverflows * UINT32_LIMIT)
+    local correctedHealing = rawHealing + (overflowData.healingOverflows * UINT32_LIMIT)
+    
+    if overflowData.damageOverflows > 0 or overflowData.healingOverflows > 0 then
+        Debug("CORRECTED STATS for " .. playerKey .. ":")
+        Debug("  Raw damage: " .. rawDamage .. " -> Corrected: " .. correctedDamage .. " (" .. overflowData.damageOverflows .. " overflows)")
+        Debug("  Raw healing: " .. rawHealing .. " -> Corrected: " .. correctedHealing .. " (" .. overflowData.healingOverflows .. " overflows)")
+    end
+    
+    return correctedDamage, correctedHealing
+end
+
+---------------------------------------------------------------------
+-- Objective Data Collection Functions
+---------------------------------------------------------------------
+
+-- Extract objective data from scoreboard based on battleground type
+local function ExtractObjectiveData(scoreData, battlegroundName)
+    if not scoreData then return 0 end
+    
+    -- Different battlegrounds use different objective fields
+    local objectives = 0
+    
+    -- Try common objective field names
+    local objectiveFields = {
+        "objectiveBG1", "objectiveBG2", "objectiveBG3", "objectiveBG4",
+        "flagsReturned", "flagsCaptured", "basesAssaulted", "basesDefended",
+        "graveyardsAssaulted", "graveyardsDefended", "towersAssaulted", "towersDefended",
+        "objectives", "objectiveValue"
+    }
+    
+    for _, field in ipairs(objectiveFields) do
+        if scoreData[field] and scoreData[field] > 0 then
+            objectives = objectives + scoreData[field]
+        end
+    end
+    
+    -- Battleground-specific logic could go here if needed
+    -- For now, we'll use the sum of all objective-related fields
+    
+    return objectives
+end
+
+-- Start periodic overflow tracking
+local function StartOverflowTracking()
+    if overflowTrackingTimer then
+        Debug("Overflow tracking already running")
+        return
+    end
+    
+    Debug("Starting overflow tracking")
+    overflowTrackingTimer = C_Timer.NewTicker(15, function() -- Check every 15 seconds
+        TrackPlayerStats()
+    end)
+end
+
+-- Stop overflow tracking
+local function StopOverflowTracking()
+    if overflowTrackingTimer then
+        overflowTrackingTimer:Cancel()
+        overflowTrackingTimer = nil
+        Debug("Stopped overflow tracking")
+    end
 end
 
 -- Track initial player count to detect when enemy team becomes visible
@@ -1360,6 +1540,20 @@ local function CollectScoreData(attemptNumber)
                 foundCurrentPlayer = true
             end
             
+            -- Get raw damage/healing values
+            local rawDamage = s.damageDone or s.damage or 0
+            local rawHealing = s.healingDone or s.healing or 0
+            
+            -- Apply overflow correction
+            local playerKey = GetPlayerKey(playerName, realmName)
+            local correctedDamage, correctedHealing = GetCorrectedStats(playerKey, rawDamage, rawHealing)
+            
+            -- Extract objective data
+            local map = C_Map.GetBestMapForUnit("player") or 0
+            local mapInfo = C_Map.GetMapInfo(map)
+            local battlegroundName = (mapInfo and mapInfo.name) or "Unknown"
+            local objectives = ExtractObjectiveData(s, battlegroundName)
+            
             -- Create player data (participation will be determined later)
             local playerData = {
                 name = playerName,
@@ -1367,11 +1561,17 @@ local function CollectScoreData(attemptNumber)
                 faction = factionName,
                 class = className,
                 spec = specName,
-                damage = s.damageDone or s.damage or 0,
-                healing = s.healingDone or s.healing or 0,
+                damage = correctedDamage,
+                healing = correctedHealing,
                 kills = s.killingBlows or s.kills or 0,
                 deaths = s.deaths or 0,
                 honorableKills = s.honorableKills or s.honorKills or 0,
+                objectives = objectives,
+                -- Overflow tracking data
+                rawDamage = rawDamage,
+                rawHealing = rawHealing,
+                damageOverflows = playerTracker.overflowDetected[playerKey] and playerTracker.overflowDetected[playerKey].damageOverflows or 0,
+                healingOverflows = playerTracker.overflowDetected[playerKey] and playerTracker.overflowDetected[playerKey].healingOverflows or 0,
                 -- Will be set later by the simple list comparison
                 isBackfill = false,
                 isAfker = false
@@ -1846,9 +2046,12 @@ function ExportBattleground(key)
             kills = player.kills or player.killingBlows or player.kb or 0,
             deaths = player.deaths or 0,
             honorableKills = player.honorableKills or 0,
-            objectives = 0,
+            objectives = player.objectives or 0, -- Use collected objective data
             -- Simple participation data
-            isBackfill = player.isBackfill or false
+            isBackfill = player.isBackfill or false,
+            -- Overflow tracking data (for debugging/validation)
+            damageOverflows = player.damageOverflows or 0,
+            healingOverflows = player.healingOverflows or 0
         })
     end
     
@@ -2147,18 +2350,69 @@ function ShowExportMenu()
 end
 
 ---------------------------------------------------------------------
--- UI factory - completely rebuilt
+-- UI factory - completely rebuilt with proper column positioning
 ---------------------------------------------------------------------
+
+-- Column positions (left edge of each column)
+local COLUMN_POSITIONS = {
+    name = 10,       -- Player name
+    realm = 140,     -- Realm  
+    class = 280,     -- Class
+    spec = 380,      -- Spec
+    faction = 480,   -- Faction
+    damage = 560,    -- Damage
+    healing = 660,   -- Healing
+    kills = 760,     -- Kills
+    deaths = 800,    -- Deaths
+    objectives = 840, -- Objectives
+    hk = 880,        -- Honorable Kills
+    status = 940     -- Status
+}
+
+-- Column widths
+local COLUMN_WIDTHS = {
+    name = 125,      -- Player name
+    realm = 135,     -- Realm
+    class = 95,      -- Class  
+    spec = 95,       -- Spec
+    faction = 75,    -- Faction
+    damage = 95,     -- Damage
+    healing = 95,    -- Healing
+    kills = 35,      -- Kills
+    deaths = 35,     -- Deaths
+    objectives = 35, -- Objectives
+    hk = 55,         -- Honorable Kills
+    status = 60      -- Status
+}
+
 local function MakeDetailLine(parent, i)
-    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fs:SetPoint("TOPLEFT", 0, -(i-1)*LINE_HEIGHT)
-    fs:SetWidth(WIN_W-40)
+    local lineFrame = CreateFrame("Frame", nil, parent)
+    lineFrame:SetPoint("TOPLEFT", 0, -(i-1)*LINE_HEIGHT)
+    lineFrame:SetSize(WIN_W-40, LINE_HEIGHT)
     
-    -- Use a smaller monospace font for better column alignment
-    fs:SetFont("Fonts\\ARIALN.TTF", 11, "OUTLINE")
+    -- Create individual FontStrings for each column
+    local columns = {}
     
-    DetailLines[i] = fs
-    return fs
+    for columnName, xPos in pairs(COLUMN_POSITIONS) do
+        local fs = lineFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        fs:SetPoint("TOPLEFT", xPos, 0)
+        fs:SetSize(COLUMN_WIDTHS[columnName], LINE_HEIGHT)
+        fs:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+        fs:SetJustifyH("CENTER")
+        fs:SetJustifyV("MIDDLE")
+        fs:SetTextColor(1, 1, 1)
+        columns[columnName] = fs
+    end
+    
+    -- Set specific alignment for certain columns
+    columns.name:SetJustifyH("LEFT")     -- Names left-aligned
+    columns.realm:SetJustifyH("LEFT")    -- Realms left-aligned  
+    columns.damage:SetJustifyH("RIGHT")  -- Numbers right-aligned
+    columns.healing:SetJustifyH("RIGHT") -- Numbers right-aligned
+    
+    lineFrame.columns = columns
+    DetailLines[i] = lineFrame
+    return lineFrame
 end
 
 local function MakeListButton(parent, i)
@@ -2317,7 +2571,15 @@ function ShowDetail(key)
     -- Clear existing detail lines completely
     for i = 1, #DetailLines do
         if DetailLines[i] then
-            DetailLines[i]:SetText("")
+            if DetailLines[i].columns then
+                -- New column-based lines
+                for _, column in pairs(DetailLines[i].columns) do
+                    column:SetText("")
+                end
+            else
+                -- Old single-text lines (fallback)
+                DetailLines[i]:SetText("")
+            end
             DetailLines[i]:Hide()
         end
     end
@@ -2326,16 +2588,29 @@ function ShowDetail(key)
     local maxLinesToClear = math.max(50, #DetailLines) -- Clear at least 50 lines
     for i = 1, maxLinesToClear do
         if DetailLines[i] then
-            DetailLines[i]:SetText("")
+            if DetailLines[i].columns then
+                -- New column-based lines
+                for _, column in pairs(DetailLines[i].columns) do
+                    column:SetText("")
+                end
+            else
+                -- Old single-text lines (fallback)
+                DetailLines[i]:SetText("")
+            end
             DetailLines[i]:Hide()
         end
     end
     
     -- Check if data exists
     if not BGLoggerDB[key] then
-        local fs = DetailLines[1] or MakeDetailLine(WINDOW.detailContent, 1)
-        fs:SetText("No data found for this battleground")
-        fs:Show()
+        local line = DetailLines[1] or MakeDetailLine(WINDOW.detailContent, 1)
+        line.columns.name:SetText("No data found for this battleground")
+        for columnName, column in pairs(line.columns) do
+            if columnName ~= "name" then
+                column:SetText("")
+            end
+        end
+        line:Show()
         WINDOW.detailContent:SetHeight(LINE_HEIGHT)
         return
     end
@@ -2353,22 +2628,53 @@ function ShowDetail(key)
         data.winner or "Unknown",
         data.type or "Unknown"
     )
-    headerInfo:SetText(bgInfo)
+    
+    -- Use first column for header info, span across multiple columns if needed
+    headerInfo.columns.name:SetText(bgInfo)
+    for columnName, column in pairs(headerInfo.columns) do
+        if columnName ~= "name" then
+            column:SetText("")
+        else
+            column:SetTextColor(0.9, 0.9, 1) -- Light blue for header
+        end
+    end
     headerInfo:Show()
     
-    -- Add separator (wider for new layout)
+    -- Add separator
     local separator1 = DetailLines[2] or MakeDetailLine(WINDOW.detailContent, 2)
-    separator1:SetText(string.rep("=", 150))
+    for _, column in pairs(separator1.columns) do
+        column:SetText("═════") -- Unicode double line
+        column:SetTextColor(0.7, 0.7, 0.7) -- Gray color
+    end
     separator1:Show()
     
-    -- Enhanced column headers with better spacing for wider window
+    -- Column headers with perfect positioning
     local header = DetailLines[3] or MakeDetailLine(WINDOW.detailContent, 3)
-    header:SetText("Player Name                 Realm             Class        Spec              Faction      Damage      Healing     K  D   HK   Status")
+    header.columns.name:SetText("Player Name")
+    header.columns.realm:SetText("Realm") 
+    header.columns.class:SetText("Class")
+    header.columns.spec:SetText("Spec")
+    header.columns.faction:SetText("Faction")
+    header.columns.damage:SetText("Damage")
+    header.columns.healing:SetText("Healing")
+    header.columns.kills:SetText("K")
+    header.columns.deaths:SetText("D")
+    header.columns.objectives:SetText("Obj")
+    header.columns.hk:SetText("HK")
+    header.columns.status:SetText("Status")
+    
+    -- Make header text bold/colored
+    for _, column in pairs(header.columns) do
+        column:SetTextColor(1, 1, 0.5) -- Light yellow for headers
+    end
     header:Show()
     
-    -- Add separator line (wider for new layout)
+    -- Add separator line under headers
     local separator2 = DetailLines[4] or MakeDetailLine(WINDOW.detailContent, 4)
-    separator2:SetText(string.rep("-", 150))
+    for _, column in pairs(separator2.columns) do
+        column:SetText("─────") -- Unicode horizontal line character
+        column:SetTextColor(0.5, 0.5, 0.5) -- Gray color
+    end
     separator2:Show()
     
     -- Get regular players (all players in stats since AFKers aren't in the final stats)
@@ -2380,7 +2686,7 @@ function ShowDetail(key)
     
     -- Build detail lines for regular players only
     for i, row in ipairs(regularPlayers) do
-        local fs = DetailLines[i+4] or MakeDetailLine(WINDOW.detailContent, i+4)
+        local line = DetailLines[i+4] or MakeDetailLine(WINDOW.detailContent, i+4)
         
         -- Check for both new and legacy data format
         local damage = row.damage or row.dmg or 0
@@ -2388,6 +2694,7 @@ function ShowDetail(key)
         local kills = row.kills or row.killingBlows or row.kb or 0
         local deaths = row.deaths or 0
         local honorableKills = row.honorableKills or row.honorKills or 0
+        local objectives = row.objectives or 0
         local realm = row.realm or "Unknown"
         local class = row.class or "Unknown"
         local spec = row.spec or "Unknown"
@@ -2404,41 +2711,40 @@ function ShowDetail(key)
             status = "OK"   -- Normal participation
         end
         
-        -- Truncate long names/realms with more generous spacing for wider window
-        local displayName = string.sub(row.name or "Unknown", 1, 25)
-        local displayRealm = string.sub(realm, 1, 15)
-        local displayClass = string.sub(class, 1, 11)
-        local displaySpec = string.sub(spec, 1, 16)
-        local displayFaction = string.sub(faction, 1, 10)
+        -- Format damage and healing for display
+        local damageText = damage >= 1000000 and string.format("%.1fM", damage/1000000) or 
+                          damage >= 1000 and string.format("%.0fK", damage/1000) or tostring(damage)
+        local healingText = healing >= 1000000 and string.format("%.1fM", healing/1000000) or 
+                           healing >= 1000 and string.format("%.0fK", healing/1000) or tostring(healing)
         
-        -- Enhanced formatting with better column spacing for wider window
-        fs:SetFormattedText("%-25s %-15s %-11s %-16s %-10s %10s %10s %2d %2d %4d %6s",
-            displayName,
-            displayRealm,
-            displayClass,
-            displaySpec,
-            displayFaction,
-            damage >= 1000000 and string.format("%.1fM", damage/1000000) or 
-            damage >= 1000 and string.format("%.0fK", damage/1000) or tostring(damage),
-            healing >= 1000000 and string.format("%.1fM", healing/1000000) or 
-            healing >= 1000 and string.format("%.0fK", healing/1000) or tostring(healing),
-            kills,
-            deaths,
-            honorableKills,
-            status)
+        -- Set each column individually - perfect alignment guaranteed!
+        line.columns.name:SetText(row.name or "Unknown")
+        line.columns.realm:SetText(realm)
+        line.columns.class:SetText(class)
+        line.columns.spec:SetText(spec)
+        line.columns.faction:SetText(faction)
+        line.columns.damage:SetText(damageText)
+        line.columns.healing:SetText(healingText)
+        line.columns.kills:SetText(tostring(kills))
+        line.columns.deaths:SetText(tostring(deaths))
+        line.columns.objectives:SetText(tostring(objectives))
+        line.columns.hk:SetText(tostring(honorableKills))
+        line.columns.status:SetText(status)
             
         -- Color code the text based on status
-        if isBackfill then
-            fs:SetTextColor(1, 1, 0.5) -- Light yellow for backfills
-        else
-            fs:SetTextColor(1, 1, 1) -- White for normal players
+        local textColor = isBackfill and {1, 1, 0.5} or {1, 1, 1}
+        for _, column in pairs(line.columns) do
+            column:SetTextColor(textColor[1], textColor[2], textColor[3])
         end
-        fs:Show()
+        line:Show()
     end
     
     -- Add summary footer for regular players
     local summaryLine = DetailLines[#regularPlayers+6] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+6)
-    summaryLine:SetText(string.rep("-", 150))
+    for _, column in pairs(summaryLine.columns) do
+        column:SetText("─────") 
+        column:SetTextColor(0.5, 0.5, 0.5) -- Gray color
+    end
     summaryLine:Show()
     
     local totalLine = DetailLines[#regularPlayers+7] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+7)
@@ -2456,16 +2762,29 @@ function ShowDetail(key)
         if row.isBackfill then backfillCount = backfillCount + 1 end
     end
     
-    -- Show totals for regular players with better alignment
-    totalLine:SetFormattedText("TOTALS (%d active players)%66s %10s %10s %2d %2d",
-        #regularPlayers,
-        "",
-        totalDamage >= 1000000 and string.format("%.1fM", totalDamage/1000000) or 
-        totalDamage >= 1000 and string.format("%.0fK", totalDamage/1000) or tostring(totalDamage),
-        totalHealing >= 1000000 and string.format("%.1fM", totalHealing/1000000) or 
-        totalHealing >= 1000 and string.format("%.0fK", totalHealing/1000) or tostring(totalHealing),
-        totalKills,
-        totalDeaths)
+    -- Show totals with perfect column alignment
+    local totalDamageText = totalDamage >= 1000000 and string.format("%.1fM", totalDamage/1000000) or 
+                           totalDamage >= 1000 and string.format("%.0fK", totalDamage/1000) or tostring(totalDamage)
+    local totalHealingText = totalHealing >= 1000000 and string.format("%.1fM", totalHealing/1000000) or 
+                            totalHealing >= 1000 and string.format("%.0fK", totalHealing/1000) or tostring(totalHealing)
+    
+    totalLine.columns.name:SetText("TOTALS (" .. #regularPlayers .. " players)")
+    totalLine.columns.realm:SetText("")  -- Empty
+    totalLine.columns.class:SetText("")  -- Empty
+    totalLine.columns.spec:SetText("")   -- Empty
+    totalLine.columns.faction:SetText("") -- Empty
+    totalLine.columns.damage:SetText(totalDamageText)
+    totalLine.columns.healing:SetText(totalHealingText)
+    totalLine.columns.kills:SetText(tostring(totalKills))
+    totalLine.columns.deaths:SetText(tostring(totalDeaths))
+    totalLine.columns.objectives:SetText("") -- Empty
+    totalLine.columns.hk:SetText("") -- Empty
+    totalLine.columns.status:SetText("") -- Empty
+    
+    -- Make totals bold/colored
+    for _, column in pairs(totalLine.columns) do
+        column:SetTextColor(1, 1, 0.8) -- Light yellow for totals
+    end
     totalLine:Show()
     
     local currentLineIndex = #regularPlayers + 8
@@ -2473,8 +2792,14 @@ function ShowDetail(key)
     -- Add backfill summary for regular players
     if backfillCount > 0 then
         local backfillSummaryLine = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
-        backfillSummaryLine:SetFormattedText("Backfills among active players: %d", backfillCount)
-        backfillSummaryLine:SetTextColor(1, 1, 0) -- Yellow text
+        backfillSummaryLine.columns.name:SetText("Backfills among active players: " .. backfillCount)
+        for columnName, column in pairs(backfillSummaryLine.columns) do
+            if columnName == "name" then
+                column:SetTextColor(1, 1, 0) -- Yellow text
+            else
+                column:SetText("")
+            end
+        end
         backfillSummaryLine:Show()
         currentLineIndex = currentLineIndex + 1
     end
@@ -2483,14 +2808,22 @@ function ShowDetail(key)
     if #afkers > 0 then
         -- Add separator before AFKer section
         local afkerSeparator = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
-        afkerSeparator:SetText("")
+        for _, column in pairs(afkerSeparator.columns) do
+            column:SetText("")
+        end
         afkerSeparator:Show()
         currentLineIndex = currentLineIndex + 1
         
         -- AFKer section header
         local afkerHeader = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
-        afkerHeader:SetText("AFK/Early Leavers (" .. #afkers .. " players):")
-        afkerHeader:SetTextColor(1, 0.5, 0.5) -- Red text
+        afkerHeader.columns.name:SetText("AFK/Early Leavers (" .. #afkers .. " players):")
+        for columnName, column in pairs(afkerHeader.columns) do
+            if columnName == "name" then
+                column:SetTextColor(1, 0.5, 0.5) -- Red text
+            else
+                column:SetText("")
+            end
+        end
         afkerHeader:Show()
         currentLineIndex = currentLineIndex + 1
         
@@ -2500,8 +2833,14 @@ function ShowDetail(key)
             local playerString = afker.name .. "-" .. afker.realm
             local classInfo = (afker.class and afker.class ~= "Unknown") and (" (" .. afker.class .. " " .. (afker.faction or "") .. ")") or ""
             
-            afkerLine:SetText("  " .. playerString .. classInfo .. " (left before match ended)")
-            afkerLine:SetTextColor(1, 0.7, 0.7) -- Light red text
+            afkerLine.columns.name:SetText("  " .. playerString .. classInfo .. " (left before match ended)")
+            for columnName, column in pairs(afkerLine.columns) do
+                if columnName == "name" then
+                    column:SetTextColor(1, 0.7, 0.7) -- Light red text
+                else
+                    column:SetText("")
+                end
+            end
             afkerLine:Show()
             currentLineIndex = currentLineIndex + 1
         end
@@ -2972,7 +3311,55 @@ C_Timer.After(1, function()
         DebugCollectScoreData = DebugCollectScoreData,
         CheckTrackingStatus = CheckTrackingStatus,
         ForceCaptureBypassed = ForceCaptureBypassed,
-        IsMatchStarted = IsMatchStarted
+        IsMatchStarted = IsMatchStarted,
+        DebugOverflowTracking = function()
+            if not insideBG then
+                print("Not in a battleground")
+                return
+            end
+            
+            print("=== Overflow Tracking Debug ===")
+            print("Total tracked players: " .. tCount(playerTracker.lastCheck))
+            
+            for playerKey, data in pairs(playerTracker.lastCheck) do
+                local overflows = playerTracker.overflowDetected[playerKey]
+                if overflows and (overflows.damageOverflows > 0 or overflows.healingOverflows > 0) then
+                    print("OVERFLOW DETECTED: " .. playerKey)
+                    print("  Damage overflows: " .. overflows.damageOverflows)
+                    print("  Healing overflows: " .. overflows.healingOverflows)
+                    print("  Current damage: " .. data.damage)
+                    print("  Current healing: " .. data.healing)
+                end
+            end
+            print("===============================")
+        end,
+        DebugColumnAlignment = function()
+            print("=== Column Alignment Test ===")
+            print("Testing fixed-width functions:")
+            print("'" .. FixedWidthLeft("Test", 10) .. "' (should be 10 chars)")
+            print("'" .. FixedWidthCenter("Test", 10) .. "' (should be 10 chars)")  
+            print("'" .. FixedWidthRight("Test", 10) .. "' (should be 10 chars)")
+            print("'" .. FixedWidthLeft("VeryLongTextThatShouldBeTruncated", 10) .. "' (should be 10 chars)")
+            
+            -- Test full header line
+            local testHeader = 
+                FixedWidthCenter("Player Name", 14) .. "|" ..
+                FixedWidthCenter("Realm", 22) .. "|" ..
+                FixedWidthCenter("Class", 14) .. "|" ..
+                FixedWidthCenter("Spec", 14) .. "|" ..
+                FixedWidthCenter("Faction", 10) .. "|" ..
+                FixedWidthCenter("Damage", 12) .. "|" ..
+                FixedWidthCenter("Healing", 12) .. "|" ..
+                FixedWidthCenter("K", 3) .. "|" ..
+                FixedWidthCenter("D", 3) .. "|" ..
+                FixedWidthCenter("Obj", 3) .. "|" ..
+                FixedWidthCenter("HK", 5) .. "|" ..
+                FixedWidthCenter("Status", 8)
+            print("Test header (with | separators):")
+            print("'" .. testHeader .. "'")
+            print("Header length: " .. #testHeader .. " characters")
+            print("============================")
+        end
         })
     end
 end)
@@ -3034,6 +3421,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             saveInProgress = false
             ResetPlayerTracker() -- Initialize player tracking
             initialPlayerCount = 0 -- Reset player count tracking
+            StartOverflowTracking() -- Start monitoring for overflow
             
             -- Don't capture initial list immediately - wait for match to start
             Debug("Waiting for match to start before capturing initial player list")
@@ -3272,12 +3660,16 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         bgStartTime = 0
         matchSaved = false
         saveInProgress = false
+        StopOverflowTracking() -- Stop monitoring overflow
         -- Reset player tracker on BG exit
         playerTracker.initialPlayerList = {}
         playerTracker.finalPlayerList = {}
         playerTracker.initialListCaptured = false
         playerTracker.battleHasBegun = false
         playerTracker.detectedAFKers = {}
+        playerTracker.damageHealing = {}
+        playerTracker.lastCheck = {}
+        playerTracker.overflowDetected = {}
         Debug("BG exit: All flags reset, player tracker cleared")
     end
 end)
