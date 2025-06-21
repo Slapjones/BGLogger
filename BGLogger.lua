@@ -12,7 +12,8 @@ local insideBG, matchSaved   = false, false
 local bgStartTime            = 0
 local MIN_BG_TIME            = 30  -- Minimum seconds in BG before saving
 local GetWinner              = _G.GetBattlefieldWinner -- may be nil on some clients
-local DEBUG_MODE             = true -- Set to true for easier troubleshooting
+-- Debug mode: false for production releases, can be toggled by users
+local DEBUG_MODE             = false -- Set to false for production, true for development
 local saveInProgress         = false
 local ALLOW_TEST_EXPORTS     = DEBUG_MODE
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
@@ -34,6 +35,30 @@ local function Debug(msg)
     if DEBUG_MODE then
         print("|cff00ffffBGLogger:|r " .. tostring(msg))
     end
+end
+
+-- Toggle debug mode for users
+local function ToggleDebugMode()
+    DEBUG_MODE = not DEBUG_MODE
+    BGLoggerDB.debugMode = DEBUG_MODE -- Save to saved variables
+    
+    if DEBUG_MODE then
+        print("|cff00ffffBGLogger:|r Debug mode |cff00ff00ENABLED|r")
+        print("|cff00ffffBGLogger:|r You will now see detailed debug information")
+        print("|cff00ffffBGLogger:|r Use '/bglogger debug' again to disable")
+    else
+        print("|cff00ffffBGLogger:|r Debug mode |cffff0000DISABLED|r")
+        print("|cff00ffffBGLogger:|r Debug output is now hidden")
+    end
+end
+
+-- Initialize debug mode from saved variables
+local function InitializeDebugMode()
+    if BGLoggerDB.debugMode ~= nil then
+        DEBUG_MODE = BGLoggerDB.debugMode
+    end
+    -- Update dependent variables
+    ALLOW_TEST_EXPORTS = DEBUG_MODE
 end
 
 ---------------------------------------------------------------------
@@ -2862,10 +2887,24 @@ function DebugExportVsHash(key)
 end
 
 ---------------------------------------------------------------------
--- Slash cmd
+-- Slash commands
 ---------------------------------------------------------------------
 SLASH_BGLOGGER1 = "/bgstats"
-SlashCmdList.BGLOGGER = function()
+SLASH_BGLOGGER2 = "/bglogger"
+SlashCmdList.BGLOGGER = function(msg)
+    local command = msg and msg:lower() or ""
+    
+    if command == "debug" then
+        ToggleDebugMode()
+        return
+    elseif command == "help" then
+        print("|cff00ffffBGLogger Commands:|r")
+        print("|cffffffff/bgstats|r or |cffffffff/bglogger|r - Open/close BGLogger window")
+        print("|cffffffff/bglogger debug|r - Toggle debug mode on/off")
+        print("|cffffffff/bglogger help|r - Show this help")
+        return
+    end
+    
     Debug("Slash command executed")
     
     -- Create window if it doesn't exist
@@ -2890,6 +2929,11 @@ end
 ---------------------------------------------------------------------
 -- Initialize Debug Module (if available)
 ---------------------------------------------------------------------
+
+-- Initialize debug mode from saved variables
+C_Timer.After(0.5, function()
+    InitializeDebugMode()
+end)
 
 -- Try to initialize debug module
 C_Timer.After(1, function()
@@ -3431,23 +3475,14 @@ function DebugTimingStatus()
 end
 
 -- Print loaded message
-print("|cff00ffffBGLogger|r addon loaded. Use |cffffffff/bgstats|r to open the window.")
+print("|cff00ffffBGLogger|r loaded successfully! Use |cffffffff/bgstats|r to open the statistics window.")
+print("|cff00ffffBGLogger|r Use |cffffffff/bglogger help|r for additional commands.")
+
+-- Debug mode startup messages
 if DEBUG_MODE then
-    print("|cff00ffffBGLogger|r debug mode active. Use |cffffffff/bgdebug|r for debug commands.")
-    print("|cff00ffffBGLogger|r tip: Use |cffffffff/bgdebug forcesave|r to manually save current BG data.")
-    print("|cff00ffffBGLogger|r tip: Use |cffffffff/bgdebug timing|r to check real-time timing status.")
-    print("|cff00ffffBGLogger|r tip: Use |cffffffff/bgdebug bgtype|r to debug BG type detection.")
-    print("|cff00ffffBGLogger|r tip: Use |cffffffff/bgdebug tracking|r to debug player participation tracking.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffDebugPlayerTracking()|r can also be called directly.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffDebugAFKerDetection()|r analyzes AFKer detection in detail.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffForceCaptureInitialList()|r manually captures the initial list.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffResetPlayerTracking()|r resets all tracking data (debugging).")
-    print("|cff00ffffBGLogger|r tip: |cffffffffDebugMatchStart()|r tests match start detection.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffDebugScoreboardData()|r shows raw scoreboard data.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffDebugCollectScoreData()|r tests final data collection.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffCheckTrackingStatus()|r shows current tracking state.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffForceCaptureBypassed()|r emergency capture bypassing all checks.")
-    print("|cff00ffffBGLogger|r tip: |cffffffffGetParticipationSummary()|r explains the participation system.")
+    print("|cff00ffffBGLogger|r |cffff8800Debug mode is ACTIVE|r")
+    print("|cff00ffffBGLogger|r Use |cffffffff/bglogger debug|r to toggle debug mode")
+    print("|cff00ffffBGLogger|r Development functions are available in console")
 end
 
 -- Initialize minimap button after addon loads
