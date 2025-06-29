@@ -94,6 +94,9 @@ local function ResetPlayerTracker()
         playerTracker.damageHealing = {}
         playerTracker.lastCheck = {}
         playerTracker.overflowDetected = {}
+        -- In-progress BG tracking flags
+        playerTracker.joinedInProgress = false
+        playerTracker.playerJoinedInProgress = false
         Debug("Player tracker reset for new battleground")
     else
         Debug("Skipping tracker reset - still in active battleground")
@@ -223,31 +226,434 @@ end
 -- Objective Data Collection Functions
 ---------------------------------------------------------------------
 
--- Extract objective data from scoreboard based on battleground type
-local function ExtractObjectiveData(scoreData, battlegroundName)
-    if not scoreData then return 0 end
+
+
+-- NEW: Extract detailed objective data using the stats table (PVPStatInfo[])
+local function ExtractObjectiveDataFromStats(scoreData)
+    if not scoreData or not scoreData.stats then 
+        Debug("No stats table available, falling back to legacy method")
+        return nil  -- Will trigger fallback to legacy method
+    end
     
-    -- Different battlegrounds use different objective fields
-    local objectives = 0
+    local objectiveBreakdown = {}
+    local totalObjectives = 0
+    local foundStats = {}
     
-    -- Try common objective field names
-    local objectiveFields = {
-        "objectiveBG1", "objectiveBG2", "objectiveBG3", "objectiveBG4",
-        "flagsReturned", "flagsCaptured", "basesAssaulted", "basesDefended",
-        "graveyardsAssaulted", "graveyardsDefended", "towersAssaulted", "towersDefended",
-        "objectives", "objectiveValue"
-    }
+    Debug("Extracting objectives from stats table with " .. #scoreData.stats .. " entries")
     
-    for _, field in ipairs(objectiveFields) do
-        if scoreData[field] and scoreData[field] > 0 then
-            objectives = objectives + scoreData[field]
+    -- Scan through all PVP stats looking for objective-related ones
+    for _, stat in ipairs(scoreData.stats) do
+        local statName = (stat.name or ""):lower()
+        local statValue = stat.pvpStatValue or 0
+        local statID = stat.pvpStatID
+        local originalName = stat.name or ""
+        
+        -- Check if this stat represents an objective based on name patterns
+        local isObjectiveStat = (
+            statName:find("flag") or statName:find("capture") or statName:find("return") or
+            statName:find("base") or statName:find("assault") or statName:find("defend") or
+            statName:find("orb") or statName:find("gate") or statName:find("cart") or
+            statName:find("tower") or statName:find("graveyard") or 
+            statName:find("mine") or statName:find("node") or 
+            statName:find("azerite") or statName:find("structure") or
+            statName:find("demolisher") or statName:find("vehicle") or
+            statName:find("goal") or statName:find("objective")
+        )
+        
+        if isObjectiveStat and statValue > 0 then
+            totalObjectives = totalObjectives + statValue
+            
+            -- Categorize the objective type based on name
+            local objectiveType = "other"
+            if statName:find("flag") and statName:find("capture") then
+                objectiveType = "flagsCaptured"
+            elseif statName:find("flag") and statName:find("return") then
+                objectiveType = "flagsReturned"
+            elseif statName:find("base") and statName:find("assault") then
+                objectiveType = "basesAssaulted"
+            elseif statName:find("base") and statName:find("defend") then
+                objectiveType = "basesDefended"
+            elseif statName:find("tower") and statName:find("assault") then
+                objectiveType = "towersAssaulted"
+            elseif statName:find("tower") and statName:find("defend") then
+                objectiveType = "towersDefended"
+            elseif statName:find("graveyard") and statName:find("assault") then
+                objectiveType = "graveyardsAssaulted"
+            elseif statName:find("graveyard") and statName:find("defend") then
+                objectiveType = "graveyardsDefended"
+            elseif statName:find("gate") and statName:find("destroy") then
+                objectiveType = "gatesDestroyed"
+            elseif statName:find("gate") and statName:find("defend") then
+                objectiveType = "gatesDefended"
+            elseif statName:find("cart") then
+                objectiveType = "cartsControlled"
+            elseif statName:find("orb") then
+                objectiveType = "orbScore"
+            elseif statName:find("azerite") then
+                objectiveType = "azeriteCollected"
+            elseif statName:find("structure") and statName:find("destroy") then
+                objectiveType = "structuresDestroyed"
+            elseif statName:find("structure") and statName:find("defend") then
+                objectiveType = "structuresDefended"
+            elseif statName:find("demolisher") or statName:find("vehicle") then
+                objectiveType = "vehiclesDestroyed"
+            else
+                objectiveType = "objectives"  -- Generic catch-all
+            end
+            
+            -- Add to breakdown (sum if multiple stats map to same type)
+            objectiveBreakdown[objectiveType] = (objectiveBreakdown[objectiveType] or 0) + statValue
+            
+            table.insert(foundStats, {
+                name = originalName,
+                value = statValue,
+                id = statID,
+                type = objectiveType
+            })
+            Debug("Found objective stat: " .. originalName .. " = " .. statValue .. " -> " .. objectiveType .. " (ID: " .. tostring(statID) .. ")")
         end
     end
     
-    -- Battleground-specific logic could go here if needed
-    -- For now, we'll use the sum of all objective-related fields
+    if #foundStats > 0 then
+        Debug("Stats-based extraction found " .. totalObjectives .. " total objectives from " .. #foundStats .. " stat types")
+        Debug("Objective breakdown: " .. table.concat(
+            (function()
+                local parts = {}
+                for k, v in pairs(objectiveBreakdown) do
+                    table.insert(parts, k .. "=" .. v)
+                end
+                return parts
+            end)(), ", "
+        ))
+        return totalObjectives, objectiveBreakdown
+    else
+        Debug("No objective stats found in stats table")
+        return 0, {}
+    end
+end
+
+-- LEGACY: Extract detailed objective data from scoreboard based on battleground type (fallback)
+local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
+    if not scoreData then return 0, {} end
     
-    return objectives
+    -- Normalize battleground name for comparison
+    local bgName = (battlegroundName or ""):lower()
+    local objectiveBreakdown = {}
+    
+    Debug("Using LEGACY ExtractObjectiveData for BG: " .. bgName)
+    
+    -- Battleground-specific objective extraction
+    if bgName:find("warsong") or bgName:find("twin peaks") then
+        -- Capture the Flag maps: focus on flag captures and returns
+        local flagsCaptured = scoreData.flagsCaptured or 0
+        local flagsReturned = scoreData.flagsReturned or 0
+        local objectives = flagsCaptured + flagsReturned
+        
+        if flagsCaptured > 0 then objectiveBreakdown.flagsCaptured = flagsCaptured end
+        if flagsReturned > 0 then objectiveBreakdown.flagsReturned = flagsReturned end
+        
+        Debug("CTF BG - Flags captured: " .. flagsCaptured .. ", returned: " .. flagsReturned .. ", total: " .. objectives)
+        return objectives, objectiveBreakdown
+        
+    elseif bgName:find("temple of kotmogu") then
+        -- Temple of Kotmogu: orb control points (can be very high numbers)
+        -- Try multiple possible field names for orb score
+        local orbScore = scoreData.orbScore or scoreData.objectives or scoreData.objectiveValue or 
+                        scoreData.objectiveBG1 or scoreData.score or 0
+        
+        if orbScore > 0 then objectiveBreakdown.orbScore = orbScore end
+        
+        Debug("Temple of Kotmogu - Orb score: " .. orbScore)
+        return orbScore, objectiveBreakdown
+        
+    elseif bgName:find("arathi basin") or bgName:find("battle for gilneas") or bgName:find("eye of the storm") then
+        -- Resource-based battlegrounds: bases captured/defended
+        local basesAssaulted = scoreData.basesAssaulted or 0
+        local basesDefended = scoreData.basesDefended or 0
+        local objectives = basesAssaulted + basesDefended
+        
+        if basesAssaulted > 0 then objectiveBreakdown.basesAssaulted = basesAssaulted end
+        if basesDefended > 0 then objectiveBreakdown.basesDefended = basesDefended end
+        
+        Debug("Resource BG - Bases assaulted: " .. basesAssaulted .. ", defended: " .. basesDefended .. ", total: " .. objectives)
+        return objectives, objectiveBreakdown
+        
+    elseif bgName:find("alterac valley") or bgName:find("isle of conquest") then
+        -- Large battlegrounds: multiple objective types
+        local towersAssaulted = scoreData.towersAssaulted or 0
+        local towersDefended = scoreData.towersDefended or 0
+        local graveyardsAssaulted = scoreData.graveyardsAssaulted or 0
+        local graveyardsDefended = scoreData.graveyardsDefended or 0
+        local basesAssaulted = scoreData.basesAssaulted or 0
+        local basesDefended = scoreData.basesDefended or 0
+        local objectives = towersAssaulted + towersDefended + graveyardsAssaulted + graveyardsDefended + basesAssaulted + basesDefended
+        
+        if towersAssaulted > 0 then objectiveBreakdown.towersAssaulted = towersAssaulted end
+        if towersDefended > 0 then objectiveBreakdown.towersDefended = towersDefended end
+        if graveyardsAssaulted > 0 then objectiveBreakdown.graveyardsAssaulted = graveyardsAssaulted end
+        if graveyardsDefended > 0 then objectiveBreakdown.graveyardsDefended = graveyardsDefended end
+        if basesAssaulted > 0 then objectiveBreakdown.basesAssaulted = basesAssaulted end
+        if basesDefended > 0 then objectiveBreakdown.basesDefended = basesDefended end
+        
+        Debug("Large BG - Towers: " .. (towersAssaulted + towersDefended) .. ", GYs: " .. (graveyardsAssaulted + graveyardsDefended) .. ", Bases: " .. (basesAssaulted + basesDefended) .. ", total: " .. objectives)
+        return objectives, objectiveBreakdown
+        
+    elseif bgName:find("strand") then
+        -- Strand of the Ancients: gates destroyed/defended
+        local gatesDestroyed = scoreData.gatesDestroyed or scoreData.objectiveBG1 or 0
+        local gatesDefended = scoreData.gatesDefended or scoreData.objectiveBG2 or 0
+        local objectives = gatesDestroyed + gatesDefended
+        
+        if gatesDestroyed > 0 then objectiveBreakdown.gatesDestroyed = gatesDestroyed end
+        if gatesDefended > 0 then objectiveBreakdown.gatesDefended = gatesDefended end
+        
+        Debug("Strand - Gates destroyed: " .. gatesDestroyed .. ", defended: " .. gatesDefended .. ", total: " .. objectives)
+        return objectives, objectiveBreakdown
+        
+    elseif bgName:find("silvershard") then
+        -- Silvershard Mines: carts controlled/captured
+        local cartsControlled = scoreData.cartsControlled or scoreData.objectiveBG1 or 0
+        
+        if cartsControlled > 0 then objectiveBreakdown.cartsControlled = cartsControlled end
+        
+        Debug("Silvershard - Carts controlled: " .. cartsControlled)
+        return cartsControlled, objectiveBreakdown
+        
+    elseif bgName:find("deepwind") then
+        -- Deepwind Gorge: capture points and flag captures
+        local flagsCaptured = scoreData.flagsCaptured or 0
+        local basesAssaulted = scoreData.basesAssaulted or 0
+        local objectives = flagsCaptured + basesAssaulted
+        
+        if flagsCaptured > 0 then objectiveBreakdown.flagsCaptured = flagsCaptured end
+        if basesAssaulted > 0 then objectiveBreakdown.basesAssaulted = basesAssaulted end
+        
+        Debug("Deepwind - Flags: " .. flagsCaptured .. ", bases: " .. basesAssaulted .. ", total: " .. objectives)
+        return objectives, objectiveBreakdown
+        
+    elseif bgName:find("seething shore") then
+        -- Seething Shore: azerite collected
+        local azeriteCollected = scoreData.azeriteCollected or scoreData.objectives or scoreData.objectiveBG1 or 0
+        
+        if azeriteCollected > 0 then objectiveBreakdown.azeriteCollected = azeriteCollected end
+        
+        Debug("Seething Shore - Azerite collected: " .. azeriteCollected)
+        return azeriteCollected, objectiveBreakdown
+        
+    elseif bgName:find("deephaul") then
+        -- Deephaul Ravine: carts controlled/escorted
+        local cartsEscorted = scoreData.cartsEscorted or scoreData.cartsControlled or scoreData.objectiveBG1 or 0
+        
+        if cartsEscorted > 0 then objectiveBreakdown.cartsControlled = cartsEscorted end
+        
+        Debug("Deephaul - Carts escorted: " .. cartsEscorted)
+        return cartsEscorted, objectiveBreakdown
+        
+    elseif bgName:find("wintergrasp") or bgName:find("tol barad") then
+        -- Wintergrasp/Tol Barad: structures destroyed/defended
+        local structuresDestroyed = scoreData.structuresDestroyed or scoreData.objectiveBG1 or 0
+        local structuresDefended = scoreData.structuresDefended or scoreData.objectiveBG2 or 0
+        local objectives = structuresDestroyed + structuresDefended
+        
+        if structuresDestroyed > 0 then objectiveBreakdown.structuresDestroyed = structuresDestroyed end
+        if structuresDefended > 0 then objectiveBreakdown.structuresDefended = structuresDefended end
+        
+        Debug("Epic BG - Structures destroyed: " .. structuresDestroyed .. ", defended: " .. structuresDefended .. ", total: " .. objectives)
+        return objectives, objectiveBreakdown
+        
+    else
+        -- Generic/unknown battleground: try all common objective fields
+        local objectives = 0
+        local fieldMapping = {
+            flagsCaptured = "flagsCaptured",
+            flagsReturned = "flagsReturned",
+            basesAssaulted = "basesAssaulted",
+            basesDefended = "basesDefended",
+            towersAssaulted = "towersAssaulted",
+            towersDefended = "towersDefended",
+            graveyardsAssaulted = "graveyardsAssaulted",
+            graveyardsDefended = "graveyardsDefended",
+            gatesDestroyed = "gatesDestroyed",
+            gatesDefended = "gatesDefended",
+            cartsControlled = "cartsControlled",
+            cartsEscorted = "cartsControlled",  -- Map escorted to controlled
+            orbScore = "orbScore",
+            azeriteCollected = "azeriteCollected",
+            structuresDestroyed = "structuresDestroyed",
+            structuresDefended = "structuresDefended",
+            demolishersDestroyed = "vehiclesDestroyed",
+            vehiclesDestroyed = "vehiclesDestroyed",
+            nodesAssaulted = "basesAssaulted",  -- Map nodes to bases
+            nodesDefended = "basesDefended"
+        }
+        
+        -- Generic fields to try
+        local genericFields = {
+            "objectives", "objectiveValue", "score",
+            "objectiveBG1", "objectiveBG2", "objectiveBG3", "objectiveBG4"
+        }
+        
+        -- Check mapped fields first
+        for fieldName, breakdownKey in pairs(fieldMapping) do
+            local value = scoreData[fieldName] or 0
+            if value > 0 then
+                objectives = objectives + value
+                objectiveBreakdown[breakdownKey] = (objectiveBreakdown[breakdownKey] or 0) + value
+                Debug("Generic BG - Found " .. fieldName .. ": " .. value .. " -> " .. breakdownKey)
+            end
+        end
+        
+        -- Check generic fields if no specific ones found
+        if objectives == 0 then
+            for _, field in ipairs(genericFields) do
+                local value = scoreData[field] or 0
+                if value > 0 then
+                    objectives = objectives + value
+                    objectiveBreakdown.objectives = (objectiveBreakdown.objectives or 0) + value
+                    Debug("Generic BG - Found " .. field .. ": " .. value)
+                end
+            end
+        end
+        
+        Debug("Generic/Unknown BG (" .. bgName .. ") - Total objectives: " .. objectives)
+        return objectives, objectiveBreakdown
+    end
+end
+
+-- MAIN: Extract objective data with stats-first approach and legacy fallback
+local function ExtractObjectiveData(scoreData, battlegroundName)
+    if not scoreData then return 0, {} end
+    
+    -- Method 1: Try the new stats-based extraction first
+    local statsResult, statsBreakdown = ExtractObjectiveDataFromStats(scoreData)
+    if statsResult ~= nil then
+        Debug("Using stats-based objective extraction: " .. statsResult)
+        return statsResult, statsBreakdown or {}
+    end
+    
+    -- Method 2: Fall back to legacy field-based extraction
+    Debug("Stats-based extraction failed, using legacy method")
+    return ExtractObjectiveDataLegacy(scoreData, battlegroundName)
+end
+
+-- Determine what objective columns should be displayed for this battleground
+local function GetObjectiveColumns(battlegroundName, playerDataList)
+    local bgName = (battlegroundName or ""):lower()
+    local availableObjectives = {}
+    
+    -- Scan all players to see what objective types actually have data
+    for _, player in ipairs(playerDataList or {}) do
+        if player.objectiveBreakdown then
+            for objType, value in pairs(player.objectiveBreakdown) do
+                if value > 0 then
+                    availableObjectives[objType] = true
+                end
+            end
+        end
+    end
+    
+    -- Define column order and display names based on battleground type
+    local columnDefinitions = {}
+    
+    -- Battleground-specific column layouts
+    if bgName:find("warsong") or bgName:find("twin peaks") then
+        -- Capture the Flag maps
+        columnDefinitions = {
+            {key = "flagsCaptured", name = "FC", tooltip = "Flags Captured"},
+            {key = "flagsReturned", name = "FR", tooltip = "Flags Returned"}
+        }
+    elseif bgName:find("temple of kotmogu") then
+        -- Temple of Kotmogu
+        columnDefinitions = {
+            {key = "orbScore", name = "Orb", tooltip = "Orb Score"}
+        }
+    elseif bgName:find("arathi") or bgName:find("battle for gilneas") or bgName:find("eye of the storm") then
+        -- Resource-based battlegrounds
+        columnDefinitions = {
+            {key = "basesAssaulted", name = "BA", tooltip = "Bases Assaulted"},
+            {key = "basesDefended", name = "BD", tooltip = "Bases Defended"}
+        }
+    elseif bgName:find("alterac valley") or bgName:find("isle of conquest") then
+        -- Large battlegrounds with multiple objective types
+        columnDefinitions = {
+            {key = "towersAssaulted", name = "TA", tooltip = "Towers Assaulted"},
+            {key = "towersDefended", name = "TD", tooltip = "Towers Defended"},
+            {key = "graveyardsAssaulted", name = "GA", tooltip = "Graveyards Assaulted"},
+            {key = "graveyardsDefended", name = "GD", tooltip = "Graveyards Defended"},
+            {key = "basesAssaulted", name = "BA", tooltip = "Bases Assaulted"},
+            {key = "basesDefended", name = "BD", tooltip = "Bases Defended"}
+        }
+    elseif bgName:find("strand") then
+        -- Strand of the Ancients
+        columnDefinitions = {
+            {key = "gatesDestroyed", name = "GDest", tooltip = "Gates Destroyed"},
+            {key = "gatesDefended", name = "GDef", tooltip = "Gates Defended"}
+        }
+    elseif bgName:find("silvershard") or bgName:find("deephaul") then
+        -- Cart-based battlegrounds
+        columnDefinitions = {
+            {key = "cartsControlled", name = "Carts", tooltip = "Carts Controlled"}
+        }
+    elseif bgName:find("seething shore") then
+        -- Seething Shore
+        columnDefinitions = {
+            {key = "azeriteCollected", name = "Azer", tooltip = "Azerite Collected"}
+        }
+    elseif bgName:find("deepwind") then
+        -- Deepwind Gorge (mixed objectives)
+        columnDefinitions = {
+            {key = "flagsCaptured", name = "FC", tooltip = "Flags Captured"},
+            {key = "basesAssaulted", name = "BA", tooltip = "Bases Assaulted"}
+        }
+    elseif bgName:find("wintergrasp") or bgName:find("tol barad") then
+        -- Epic battlegrounds
+        columnDefinitions = {
+            {key = "structuresDestroyed", name = "SDest", tooltip = "Structures Destroyed"},
+            {key = "structuresDefended", name = "SDef", tooltip = "Structures Defended"}
+        }
+    else
+        -- Generic/unknown battleground - show all available objectives
+        local commonObjectives = {
+            {key = "flagsCaptured", name = "FC", tooltip = "Flags Captured"},
+            {key = "flagsReturned", name = "FR", tooltip = "Flags Returned"},
+            {key = "basesAssaulted", name = "BA", tooltip = "Bases Assaulted"},
+            {key = "basesDefended", name = "BD", tooltip = "Bases Defended"},
+            {key = "towersAssaulted", name = "TA", tooltip = "Towers Assaulted"},
+            {key = "towersDefended", name = "TD", tooltip = "Towers Defended"},
+            {key = "graveyardsAssaulted", name = "GA", tooltip = "Graveyards Assaulted"},
+            {key = "graveyardsDefended", name = "GD", tooltip = "Graveyards Defended"},
+            {key = "gatesDestroyed", name = "GDest", tooltip = "Gates Destroyed"},
+            {key = "gatesDefended", name = "GDef", tooltip = "Gates Defended"},
+            {key = "cartsControlled", name = "Carts", tooltip = "Carts Controlled"},
+            {key = "orbScore", name = "Orb", tooltip = "Orb Score"},
+            {key = "azeriteCollected", name = "Azer", tooltip = "Azerite Collected"},
+            {key = "structuresDestroyed", name = "SDest", tooltip = "Structures Destroyed"},
+            {key = "structuresDefended", name = "SDef", tooltip = "Structures Defended"},
+            {key = "vehiclesDestroyed", name = "Vehi", tooltip = "Vehicles Destroyed"},
+            {key = "objectives", name = "Obj", tooltip = "Other Objectives"}
+        }
+        columnDefinitions = commonObjectives
+    end
+    
+    -- Filter columns to only show those that have data
+    local activeColumns = {}
+    for _, colDef in ipairs(columnDefinitions) do
+        if availableObjectives[colDef.key] then
+            table.insert(activeColumns, colDef)
+        end
+    end
+    
+    -- If no specific objectives found, fall back to the generic "objectives" column
+    if #activeColumns == 0 then
+        table.insert(activeColumns, {key = "objectives", name = "Obj", tooltip = "Total Objectives"})
+    end
+    
+    Debug("Objective columns for " .. bgName .. ": " .. #activeColumns .. " active columns")
+    for _, col in ipairs(activeColumns) do
+        Debug("  " .. col.key .. " -> " .. col.name .. " (" .. col.tooltip .. ")")
+    end
+    
+    return activeColumns
 end
 
 -- Start periodic overflow tracking
@@ -258,7 +664,7 @@ local function StartOverflowTracking()
     end
     
     Debug("Starting overflow tracking")
-    overflowTrackingTimer = C_Timer.NewTicker(15, function() -- Check every 15 seconds
+    overflowTrackingTimer = C_Timer.NewTicker(8, function() -- Check every 8 seconds (faster detection)
         TrackPlayerStats()
     end)
 end
@@ -602,9 +1008,15 @@ local function AnalyzePlayerLists()
     
     print("Initial list size: " .. initialCount)
     print("Final list size: " .. finalCount)
+    print("Joined in progress: " .. tostring(playerTracker.joinedInProgress or false))
     
     if initialCount == 0 then
-        print("*** WARNING: Initial list is EMPTY! Everyone will be marked as backfill! ***")
+        if playerTracker.joinedInProgress then
+            print("*** INFO: Initial list is EMPTY because player joined in-progress BG ***")
+            print("*** All players will be marked as 'unknown' participation status ***")
+        else
+            print("*** WARNING: Initial list is EMPTY! Everyone will be marked as backfill! ***")
+        end
     end
     
     if finalCount == 0 then
@@ -612,38 +1024,60 @@ local function AnalyzePlayerLists()
         return afkers, backfills, normal
     end
     
-    print("*** SIMPLIFIED LOGIC ***")
-    print("Rule 1: Anyone on final scoreboard = NOT an AFKer (they're still here)")
-    print("Rule 2: Anyone on initial list = NOT a backfill (they were here from start)")
-    
-    print("Step 1: Finding AFKers (in initial but NOT on final scoreboard)")
-    for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
-        if not playerTracker.finalPlayerList[playerKey] then
-            table.insert(afkers, playerInfo)
-            print("  AFKer: " .. playerKey .. " (was in initial, not on final scoreboard)")
-        end
-    end
-    print("Found " .. #afkers .. " AFKers")
-    
-    print("Step 2: Processing final scoreboard - everyone here is NOT an AFKer")
-    for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
-        local playerData = playerInfo.playerData
+    -- Handle in-progress BG joins differently
+    if playerTracker.joinedInProgress then
+        print("*** IN-PROGRESS BG ANALYSIS ***")
+        print("Rule: Cannot reliably determine AFKers/Backfills - player joined mid-match")
+        print("All players will be marked as 'unknown' participation status")
         
-        if playerTracker.initialPlayerList[playerKey] then
-            -- Was in initial list = normal player (not backfill, not AFKer)
+        -- Everyone on final scoreboard is treated as normal (can't determine backfill status)
+        for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
+            local playerData = playerInfo.playerData
+            -- Mark as unknown participation since we joined mid-match
+            playerData.participationUnknown = true
             table.insert(normal, playerData)
-            print("  Normal: " .. playerKey .. " (in initial list, on final scoreboard)")
-        else
-            -- Was NOT in initial list = backfill (not AFKer since they're on final scoreboard)
-            table.insert(backfills, playerData)
-            print("  Backfill: " .. playerKey .. " (NOT in initial list, on final scoreboard)")
+            print("  Unknown participation: " .. playerKey .. " (joined mid-match)")
         end
+        
+        print("*** IN-PROGRESS ANALYSIS COMPLETE ***")
+        print("Normal/Unknown players: " .. #normal)
+        print("Backfills: 0 (cannot determine)")
+        print("AFKers: 0 (cannot determine)")
+        
+    else
+        print("*** STANDARD ANALYSIS ***")
+        print("Rule 1: Anyone on final scoreboard = NOT an AFKer (they're still here)")
+        print("Rule 2: Anyone on initial list = NOT a backfill (they were here from start)")
+        
+        print("Step 1: Finding AFKers (in initial but NOT on final scoreboard)")
+        for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
+            if not playerTracker.finalPlayerList[playerKey] then
+                table.insert(afkers, playerInfo)
+                print("  AFKer: " .. playerKey .. " (was in initial, not on final scoreboard)")
+            end
+        end
+        print("Found " .. #afkers .. " AFKers")
+        
+        print("Step 2: Processing final scoreboard - everyone here is NOT an AFKer")
+        for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
+            local playerData = playerInfo.playerData
+            
+            if playerTracker.initialPlayerList[playerKey] then
+                -- Was in initial list = normal player (not backfill, not AFKer)
+                table.insert(normal, playerData)
+                print("  Normal: " .. playerKey .. " (in initial list, on final scoreboard)")
+            else
+                -- Was NOT in initial list = backfill (not AFKer since they're on final scoreboard)
+                table.insert(backfills, playerData)
+                print("  Backfill: " .. playerKey .. " (NOT in initial list, on final scoreboard)")
+            end
+        end
+        
+        print("*** STANDARD ANALYSIS COMPLETE ***")
+        print("Normal players: " .. #normal .. " (in initial, on final)")
+        print("Backfills: " .. #backfills .. " (NOT in initial, on final)")
+        print("AFKers: " .. #afkers .. " (in initial, NOT on final)")
     end
-    
-    print("*** Analysis COMPLETE ***")
-    print("Normal players: " .. #normal .. " (in initial, on final)")
-    print("Backfills: " .. #backfills .. " (NOT in initial, on final)")
-    print("AFKers: " .. #afkers .. " (in initial, NOT on final)")
     
     -- Special check for current player
     local playerName = UnitName("player")
@@ -654,10 +1088,13 @@ local function AnalyzePlayerLists()
     print("Your key: " .. yourKey)
     print("In initial: " .. (playerTracker.initialPlayerList[yourKey] and "YES" or "NO"))
     print("In final: " .. (playerTracker.finalPlayerList[yourKey] and "YES" or "NO"))
+    print("Joined in progress: " .. tostring(playerTracker.playerJoinedInProgress or false))
     
-    -- Determine your status using the simple rules
+    -- Determine your status using the appropriate rules
     local yourStatus = "UNKNOWN"
-    if playerTracker.finalPlayerList[yourKey] then
+    if playerTracker.joinedInProgress then
+        yourStatus = "JOINED IN-PROGRESS (participation status unknown)"
+    elseif playerTracker.finalPlayerList[yourKey] then
         -- You're on final scoreboard = NOT AFKer
         if playerTracker.initialPlayerList[yourKey] then
             yourStatus = "NORMAL (in initial, on final)"
@@ -1552,7 +1989,7 @@ local function CollectScoreData(attemptNumber)
             local map = C_Map.GetBestMapForUnit("player") or 0
             local mapInfo = C_Map.GetMapInfo(map)
             local battlegroundName = (mapInfo and mapInfo.name) or "Unknown"
-            local objectives = ExtractObjectiveData(s, battlegroundName)
+            local objectives, objectiveBreakdown = ExtractObjectiveData(s, battlegroundName)
             
             -- Create player data (participation will be determined later)
             local playerData = {
@@ -1567,6 +2004,7 @@ local function CollectScoreData(attemptNumber)
                 deaths = s.deaths or 0,
                 honorableKills = s.honorableKills or s.honorKills or 0,
                 objectives = objectives,
+                objectiveBreakdown = objectiveBreakdown or {},
                 -- Overflow tracking data
                 rawDamage = rawDamage,
                 rawHealing = rawHealing,
@@ -1626,17 +2064,25 @@ local function CollectScoreData(attemptNumber)
         end
     end
     
-    -- Set isBackfill flag for each player in final data
+    -- Set participation flags for each player in final data
     for _, player in ipairs(t) do
         local playerKey = GetPlayerKey(player.name, player.realm)
         
-        -- If player was NOT in initial list = backfill
-        if not playerTracker.initialPlayerList[playerKey] then
-            player.isBackfill = true
-            print("Backfill: " .. playerKey .. " (not in initial)")
+        if playerTracker.joinedInProgress then
+            -- In-progress join: can't reliably determine backfill status
+            player.isBackfill = false -- Default to false
+            player.participationUnknown = true
+            print("Unknown participation: " .. playerKey .. " (joined mid-match)")
         else
-            player.isBackfill = false
-            print("Normal: " .. playerKey .. " (in initial)")
+            -- Normal join: use standard logic
+            if not playerTracker.initialPlayerList[playerKey] then
+                player.isBackfill = true
+                print("Backfill: " .. playerKey .. " (not in initial)")
+            else
+                player.isBackfill = false
+                print("Normal: " .. playerKey .. " (in initial)")
+            end
+            player.participationUnknown = false
         end
     end
     
@@ -1715,7 +2161,7 @@ local function CommitMatch(list)
             local timeSinceBGStart = math.floor(currentTime - bgStartTime)
             
             -- Safety check for fallback duration
-            if timeSinceBGStart > 0 and timeSinceBGStart < 7200 then -- Reasonable duration
+            if timeSinceBGStart > 0 and timeSinceStart < 7200 then -- Reasonable duration
                 trueDuration = timeSinceBGStart
                 durationSource = "calculated_fallback"
                 Debug("Using fallback duration from bgStartTime: " .. trueDuration .. " seconds")
@@ -1823,8 +2269,10 @@ local function CommitMatch(list)
             endTime = currentTime,
             dateISO = date("!%Y-%m-%dT%H:%M:%SZ"),
             
-            -- Simple AFKer tracking
+            -- Enhanced participation tracking
             afkerList = playerTracker.detectedAFKers or {},
+            joinedInProgress = playerTracker.joinedInProgress or false,
+            playerJoinedInProgress = playerTracker.playerJoinedInProgress or false,
             
             -- INTEGRITY DATA - Generated at save time, not export time
             integrity = {
@@ -2035,6 +2483,12 @@ function ExportBattleground(key)
     
     for _, player in ipairs(data.stats or {}) do
         -- Add to main player list
+        -- Prepare objective data for export
+        local objectiveData = {
+            total = player.objectives or 0,
+            breakdown = player.objectiveBreakdown or {}
+        }
+        
         table.insert(exportPlayers, {
             name = player.name,
             realm = player.realm,
@@ -2046,9 +2500,10 @@ function ExportBattleground(key)
             kills = player.kills or player.killingBlows or player.kb or 0,
             deaths = player.deaths or 0,
             honorableKills = player.honorableKills or 0,
-            objectives = player.objectives or 0, -- Use collected objective data
-            -- Simple participation data
+            objectives = objectiveData, -- Enhanced objective data with breakdown
+            -- Enhanced participation data
             isBackfill = player.isBackfill or false,
+            participationUnknown = player.participationUnknown or false,
             -- Overflow tracking data (for debugging/validation)
             damageOverflows = player.damageOverflows or 0,
             healingOverflows = player.healingOverflows or 0
@@ -2629,6 +3084,11 @@ function ShowDetail(key)
         data.type or "Unknown"
     )
     
+    -- Add in-progress join indicator if applicable
+    if data.joinedInProgress then
+        bgInfo = bgInfo .. " | ⚠️ JOINED IN-PROGRESS"
+    end
+    
     -- Use first column for header info, span across multiple columns if needed
     headerInfo.columns.name:SetText(bgInfo)
     for columnName, column in pairs(headerInfo.columns) do
@@ -2700,12 +3160,15 @@ function ShowDetail(key)
         local spec = row.spec or "Unknown"
         local faction = row.faction or row.side or "Unknown"
         
-        -- Simple participation data
+        -- Enhanced participation data
         local isBackfill = row.isBackfill or false
+        local participationUnknown = row.participationUnknown or false
         
         -- Create status string
         local status = ""
-        if isBackfill then
+        if participationUnknown then
+            status = "??"   -- Unknown participation (joined in-progress BG)
+        elseif isBackfill then
             status = "BF"   -- Backfill
         else
             status = "OK"   -- Normal participation
@@ -2732,7 +3195,13 @@ function ShowDetail(key)
         line.columns.status:SetText(status)
             
         -- Color code the text based on status
-        local textColor = isBackfill and {1, 1, 0.5} or {1, 1, 1}
+        local textColor = {1, 1, 1} -- Default white
+        if participationUnknown then
+            textColor = {0.8, 0.8, 0.8} -- Gray for unknown participation
+        elseif isBackfill then
+            textColor = {1, 1, 0.5} -- Yellow for backfill
+        end
+        
         for _, column in pairs(line.columns) do
             column:SetTextColor(textColor[1], textColor[2], textColor[3])
         end
@@ -3065,25 +3534,6 @@ local function CreateMinimapButton()
                 WINDOW:Show()
                 C_Timer.After(0.1, RefreshWindow)
             end
-        elseif mouseButton == "RightButton" then
-            -- Right click: Quick save (if in BG)
-            if insideBG and not matchSaved then
-                print("|cff00ffffBGLogger:|r Force saving current battleground...")
-                local originalSaved = matchSaved
-                matchSaved = false
-                
-                local timeSinceStart = GetTime() - bgStartTime
-                if timeSinceStart < MIN_BG_TIME then
-                    bgStartTime = GetTime() - 120
-                end
-                
-                RequestBattlefieldScoreData()
-                C_Timer.After(0.5, function()
-                    AttemptSaveWithRetry("MINIMAP_FORCE_SAVE")
-                end)
-            else
-                print("|cff00ffffBGLogger:|r Not in battleground or already saved")
-            end
         end
     end)
     
@@ -3114,7 +3564,6 @@ local function CreateMinimapButton()
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("BGLogger", 1, 1, 1)
         GameTooltip:AddLine("Left Click: Open/Close BGLogger", 0.7, 0.7, 0.7)
-        GameTooltip:AddLine("Right Click: Force Save (in BG)", 0.7, 0.7, 0.7)
         GameTooltip:AddLine("Drag: Reposition button", 0.7, 0.7, 0.7)
         
         if insideBG then
@@ -3236,10 +3685,18 @@ SlashCmdList.BGLOGGER = function(msg)
     if command == "debug" then
         ToggleDebugMode()
         return
+    elseif command == "testbreakdown" then
+        if not insideBG then
+            print("|cff00ffffBGLogger:|r Not in a battleground")
+            return
+        end
+        TestObjectiveBreakdownSystem()
+        return
     elseif command == "help" then
         print("|cff00ffffBGLogger Commands:|r")
         print("|cffffffff/bgstats|r or |cffffffff/bglogger|r - Open/close BGLogger window")
         print("|cffffffff/bglogger debug|r - Toggle debug mode on/off")
+        print("|cffffffff/bglogger testbreakdown|r - Test new objective breakdown system (in BG only)")
         print("|cffffffff/bglogger help|r - Show this help")
         return
     end
@@ -3333,6 +3790,9 @@ C_Timer.After(1, function()
             end
             print("===============================")
         end,
+        DebugObjectiveData = DebugObjectiveData,
+        TestObjectiveCollection = TestObjectiveCollection,
+        DebugInProgressDetection = DebugInProgressDetection,
         DebugColumnAlignment = function()
             print("=== Column Alignment Test ===")
             print("Testing fixed-width functions:")
@@ -3423,8 +3883,70 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             initialPlayerCount = 0 -- Reset player count tracking
             StartOverflowTracking() -- Start monitoring for overflow
             
-            -- Don't capture initial list immediately - wait for match to start
-            Debug("Waiting for match to start before capturing initial player list")
+            -- CRITICAL: Check immediately if this is an in-progress BG
+            C_Timer.After(2, function() -- Small delay to let APIs populate
+                if insideBG then -- Make sure we're still in BG
+                    local isInProgressBG = false
+                    local detectionMethod = "none"
+                    
+                    -- Method 1: Check API duration (most reliable)
+                    if C_PvP and C_PvP.GetActiveMatchDuration then
+                        local apiDuration = C_PvP.GetActiveMatchDuration()
+                        if apiDuration and apiDuration > 30 then -- Match has been running for >30 seconds
+                            isInProgressBG = true
+                            detectionMethod = "API_duration_" .. apiDuration .. "s"
+                            Debug("IN-PROGRESS BG detected via API duration: " .. apiDuration .. " seconds")
+                        end
+                    end
+                    
+                    -- Method 2: Check if both teams are immediately visible (fallback)
+                    if not isInProgressBG then
+                        local rows = GetNumBattlefieldScores()
+                        if rows > 0 then
+                            local allianceCount, hordeCount = 0, 0
+                            for i = 1, math.min(rows, 10) do
+                                local success, s = pcall(C_PvP.GetScoreInfo, i)
+                                if success and s and s.name then
+                                    if s.faction == 0 then
+                                        hordeCount = hordeCount + 1
+                                    elseif s.faction == 1 then
+                                        allianceCount = allianceCount + 1
+                                    end
+                                end
+                            end
+                            
+                            -- If both teams visible immediately, likely in-progress
+                            if allianceCount > 0 and hordeCount > 0 and rows > 15 then
+                                isInProgressBG = true
+                                detectionMethod = "both_teams_visible_immediately"
+                                Debug("IN-PROGRESS BG detected via immediate team visibility")
+                            end
+                        end
+                    end
+                    
+                    if isInProgressBG then
+                        print("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
+                        print("Detection method: " .. detectionMethod)
+                        print("Player joined an ongoing match - adjusting tracking behavior")
+                        
+                        -- Set flags to indicate this is an in-progress join
+                        playerTracker.joinedInProgress = true
+                        playerTracker.battleHasBegun = true -- Match has obviously started
+                        
+                        -- Capture current state as "initial" list (best we can do)
+                        print("*** Capturing current player state as baseline (in-progress join) ***")
+                        CaptureInitialPlayerList(true) -- Skip match start validation
+                        
+                        -- Mark the player themselves as potentially a backfill
+                        -- (This will be used later in analysis)
+                        playerTracker.playerJoinedInProgress = true
+                        
+                    else
+                        Debug("Normal BG join detected - waiting for match to start")
+                        Debug("Waiting for match to start before capturing initial player list")
+                    end
+                end
+            end)
             
             -- Fallback: Set battleHasBegun flag after reasonable delay if no chat message comes
             C_Timer.After(90, function() -- 1.5 minutes after entering BG
@@ -3889,3 +4411,762 @@ C_Timer.After(1, function()
 end)
 
 C_Timer.After(2, DetectAvailableAPIs) -- Delay to ensure APIs are loaded
+
+-- Debug function to examine raw scoreboard data for objectives
+function DebugObjectiveData()
+    if not insideBG then
+        print("=== Objective Data Debug ===")
+        print("Not currently in a battleground")
+        print("============================")
+        return
+    end
+    
+    print("=== RAW OBJECTIVE DATA DEBUG ===")
+    
+    local rows = GetNumBattlefieldScores()
+    print("Total players: " .. rows)
+    
+    if rows == 0 then
+        print("No scoreboard data available")
+        print("=================================")
+        return
+    end
+    
+    -- Get map info for battleground-specific logic
+    local map = C_Map.GetBestMapForUnit("player") or 0
+    local mapInfo = C_Map.GetMapInfo(map)
+    local mapName = (mapInfo and mapInfo.name) or "Unknown"
+    print("Current Battleground: " .. mapName .. " (ID: " .. map .. ")")
+    print("")
+    
+    -- Analyze first few players for objective data
+    for i = 1, math.min(5, rows) do
+        local success, s = pcall(C_PvP.GetScoreInfo, i)
+        if success and s and s.name then
+            print("Player " .. i .. ": " .. s.name)
+            print("  All available fields:")
+            
+            -- Sort fields for better readability
+            local fields = {}
+            for key, value in pairs(s) do
+                table.insert(fields, {key = key, value = value})
+            end
+            table.sort(fields, function(a, b) return a.key < b.key end)
+            
+            -- Show all fields with their values
+            for _, field in ipairs(fields) do
+                local valueStr = tostring(field.value)
+                if type(field.value) == "number" and field.value > 0 then
+                    print("    " .. field.key .. " = " .. valueStr .. " *** NON-ZERO ***")
+                else
+                    print("    " .. field.key .. " = " .. valueStr)
+                end
+            end
+            
+            -- Test the current ExtractObjectiveData function
+            local extractedObjectives, extractedBreakdown = ExtractObjectiveData(s, mapName)
+            print("  ExtractObjectiveData result: " .. extractedObjectives)
+            if extractedBreakdown and next(extractedBreakdown) then
+                print("  Objective breakdown:")
+                for objType, value in pairs(extractedBreakdown) do
+                    print("    " .. objType .. ": " .. value)
+                end
+            end
+            print("")
+        else
+            print("Player " .. i .. ": Failed to get data")
+        end
+    end
+    
+    print("=================================")
+end
+
+-- Quick debug function to see ALL fields from a single player
+function DebugSinglePlayerAPI()
+    if not insideBG then
+        print("Not in a battleground")
+        return
+    end
+    
+    local rows = GetNumBattlefieldScores()
+    if rows == 0 then
+        print("No battlefield score data available")
+        return
+    end
+    
+    print("=== COMPLETE API DUMP (First Player) ===")
+    local success, s = pcall(C_PvP.GetScoreInfo, 1)
+    if success and s then
+        print("Player: " .. (s.name or "Unknown"))
+        print("Raw table contents:")
+        
+        -- Show everything in alphabetical order
+        local sortedKeys = {}
+        for key in pairs(s) do
+            table.insert(sortedKeys, key)
+        end
+        table.sort(sortedKeys)
+        
+        for _, key in ipairs(sortedKeys) do
+            local value = s[key]
+            local typeStr = type(value)
+            local valueStr = tostring(value)
+            
+            if typeStr == "number" then
+                if value > 0 then
+                    print(string.format("  %-25s = %s (%s) *** NON-ZERO ***", key, valueStr, typeStr))
+                else
+                    print(string.format("  %-25s = %s (%s)", key, valueStr, typeStr))
+                end
+            else
+                print(string.format("  %-25s = %s (%s)", key, valueStr, typeStr))
+            end
+        end
+    else
+        print("Failed to get player data")
+    end
+    print("=====================================")
+end
+
+-- Debug function to test in-progress BG detection
+function DebugInProgressDetection()
+    if not insideBG then
+        print("=== In-Progress BG Detection Debug ===")
+        print("Not currently in a battleground")
+        print("=====================================")
+        return
+    end
+    
+    print("=== IN-PROGRESS BG DETECTION DEBUG ===")
+    
+    -- Check API duration
+    local apiDuration = 0
+    if C_PvP and C_PvP.GetActiveMatchDuration then
+        apiDuration = C_PvP.GetActiveMatchDuration() or 0
+        print("API Match Duration: " .. apiDuration .. " seconds")
+        
+        if apiDuration > 30 then
+            print("  RESULT: IN-PROGRESS (duration > 30s)")
+        else
+            print("  RESULT: Not in-progress or just started")
+        end
+    else
+        print("API Match Duration: Not available")
+    end
+    
+    -- Check team visibility
+    local rows = GetNumBattlefieldScores()
+    print("Battlefield score players: " .. rows)
+    
+    if rows > 0 then
+        local allianceCount, hordeCount = 0, 0
+        for i = 1, math.min(rows, 10) do
+            local success, s = pcall(C_PvP.GetScoreInfo, i)
+            if success and s and s.name then
+                if s.faction == 0 then
+                    hordeCount = hordeCount + 1
+                elseif s.faction == 1 then
+                    allianceCount = allianceCount + 1
+                end
+            end
+        end
+        
+        print("Team visibility: Alliance=" .. allianceCount .. ", Horde=" .. hordeCount)
+        
+        if allianceCount > 0 and hordeCount > 0 and rows > 15 then
+            print("  RESULT: IN-PROGRESS (both teams visible with " .. rows .. " players)")
+        else
+            print("  RESULT: Not in-progress (preparation phase or insufficient data)")
+        end
+    end
+    
+    -- Show current tracking status
+    print("")
+    print("Current tracking status:")
+    print("  Joined in progress: " .. tostring(playerTracker.joinedInProgress or false))
+    print("  Player joined in progress: " .. tostring(playerTracker.playerJoinedInProgress or false))
+    print("  Battle has begun: " .. tostring(playerTracker.battleHasBegun or false))
+    print("  Initial list captured: " .. tostring(playerTracker.initialListCaptured or false))
+    print("  Initial list size: " .. tCount(playerTracker.initialPlayerList))
+    
+    print("=====================================")
+end
+
+-- Debug function to check overflow tracking status
+function DebugOverflowStatus()
+    print("=== OVERFLOW TRACKING DEBUG ===")
+    print("Inside BG: " .. tostring(insideBG))
+    print("Overflow timer running: " .. tostring(overflowTrackingTimer ~= nil))
+    
+    if not insideBG then
+        print("Not in battleground - overflow tracking should be stopped")
+        print("===============================")
+        return
+    end
+    
+    local trackedPlayers = tCount(playerTracker.lastCheck)
+    print("Players being tracked: " .. trackedPlayers)
+    
+    if trackedPlayers == 0 then
+        print("*** WARNING: No players being tracked for overflow! ***")
+        print("This could indicate TrackPlayerStats() isn't running properly")
+    end
+    
+    -- Show current player's tracking data
+    local playerName = UnitName("player")
+    local playerRealm = GetRealmName() or "Unknown-Realm"
+    local playerKey = GetPlayerKey(playerName, playerRealm)
+    
+    print("")
+    print("YOUR TRACKING DATA:")
+    print("Player key: " .. playerKey)
+    
+    local yourLastCheck = playerTracker.lastCheck[playerKey]
+    local yourOverflows = playerTracker.overflowDetected[playerKey]
+    
+    if yourLastCheck then
+        print("Last recorded damage: " .. yourLastCheck.damage)
+        print("Last recorded healing: " .. yourLastCheck.healing)
+        print("Last check timestamp: " .. yourLastCheck.timestamp .. " (current: " .. GetTime() .. ")")
+        print("Time since last check: " .. math.floor(GetTime() - yourLastCheck.timestamp) .. " seconds")
+    else
+        print("*** NO TRACKING DATA FOR YOU! ***")
+        print("This means TrackPlayerStats() hasn't seen you yet")
+    end
+    
+    if yourOverflows then
+        print("Detected damage overflows: " .. yourOverflows.damageOverflows)
+        print("Detected healing overflows: " .. yourOverflows.healingOverflows)
+        
+        if yourOverflows.healingOverflows > 0 then
+            print("*** HEALING OVERFLOW DETECTED! ***")
+        end
+    else
+        print("No overflow data initialized for you")
+    end
+    
+    -- Get current scoreboard data to compare
+    local rows = GetNumBattlefieldScores()
+    if rows > 0 then
+        for i = 1, rows do
+            local success, s = pcall(C_PvP.GetScoreInfo, i)
+            if success and s and s.name then
+                local name, realm = s.name, ""
+                if s.name:find("-") then
+                    name, realm = s.name:match("^(.+)-(.+)$")
+                else
+                    realm = GetRealmName() or "Unknown-Realm"
+                end
+                
+                local key = GetPlayerKey(name, realm)
+                if key == playerKey then
+                    local currentDamage = s.damageDone or s.damage or 0
+                    local currentHealing = s.healingDone or s.healing or 0
+                    
+                    print("")
+                    print("CURRENT SCOREBOARD VALUES:")
+                    print("Current damage: " .. currentDamage)
+                    print("Current healing: " .. currentHealing)
+                    
+                    if yourLastCheck then
+                        print("Change since last check:")
+                        print("  Damage: " .. (currentDamage - yourLastCheck.damage))
+                        print("  Healing: " .. (currentHealing - yourLastCheck.healing))
+                        
+                        -- Check if this looks like an overflow
+                        if currentHealing < yourLastCheck.healing and yourLastCheck.healing > OVERFLOW_DETECTION_THRESHOLD then
+                            print("*** POTENTIAL OVERFLOW DETECTED NOW! ***")
+                            print("Previous healing (" .. yourLastCheck.healing .. ") was above threshold")
+                            print("Current healing (" .. currentHealing .. ") is lower")
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+    
+    print("===============================")
+end
+
+-- Function to manually run overflow detection right now
+function ForceOverflowCheck()
+    if not insideBG then
+        print("Not in a battleground")
+        return
+    end
+    
+    print("=== FORCING OVERFLOW CHECK ===")
+    print("Running TrackPlayerStats() manually...")
+    
+    TrackPlayerStats()
+    
+    print("Check complete. Run DebugOverflowStatus() to see results.")
+    print("==============================")
+end
+
+-- Enhanced overflow tracking with more frequent checks and better logging
+function StartEnhancedOverflowTracking()
+    if overflowTrackingTimer then
+        overflowTrackingTimer:Cancel()
+        Debug("Stopped existing overflow tracking")
+    end
+    
+    Debug("Starting ENHANCED overflow tracking (every 5 seconds)")
+    overflowTrackingTimer = C_Timer.NewTicker(5, function() -- Check every 5 seconds instead of 15
+        if insideBG then
+            TrackPlayerStats()
+        else
+            -- Auto-stop if we leave BG
+            StopOverflowTracking()
+        end
+    end)
+end
+
+-- Test objective data collection on saved battlegrounds
+function TestObjectiveCollection()
+    print("=== Testing Objective Collection on Saved Data ===")
+    
+    local totalBGs = 0
+    local bgsWithObjectives = 0
+    local bgsByType = {}
+    
+    for key, data in pairs(BGLoggerDB) do
+        if type(data) == "table" and data.stats and data.battlegroundName then
+            totalBGs = totalBGs + 1
+            local bgName = data.battlegroundName:lower()
+            
+            -- Count by BG type
+            bgsByType[data.battlegroundName] = (bgsByType[data.battlegroundName] or 0) + 1
+            
+            -- Check if any players have objectives > 0
+            local hasObjectives = false
+            local maxObjectives = 0
+            local totalObjectives = 0
+            local playersWithObjectives = 0
+            
+            for _, player in ipairs(data.stats) do
+                local objectives = player.objectives or 0
+                if objectives > 0 then
+                    hasObjectives = true
+                    playersWithObjectives = playersWithObjectives + 1
+                    totalObjectives = totalObjectives + objectives
+                    maxObjectives = math.max(maxObjectives, objectives)
+                end
+            end
+            
+            if hasObjectives then
+                bgsWithObjectives = bgsWithObjectives + 1
+                print(data.battlegroundName .. " (" .. key .. "):")
+                print("  Players with objectives: " .. playersWithObjectives .. "/" .. #data.stats)
+                print("  Total objectives: " .. totalObjectives)
+                print("  Max objectives: " .. maxObjectives)
+                print("  Average per player: " .. math.floor(totalObjectives / #data.stats * 100) / 100)
+            else
+                print(data.battlegroundName .. " (" .. key .. "): NO OBJECTIVES RECORDED")
+            end
+        end
+    end
+    
+    print("")
+    print("Summary:")
+    print("  Total BGs: " .. totalBGs)
+    print("  BGs with objectives: " .. bgsWithObjectives)
+    print("  BGs without objectives: " .. (totalBGs - bgsWithObjectives))
+    
+    print("")
+    print("BGs by type:")
+    for bgName, count in pairs(bgsByType) do
+        print("  " .. bgName .. ": " .. count .. " matches")
+    end
+    
+    print("================================================")
+end
+
+-- Debug function to check overflow tracking status
+function DebugOverflowStatus()
+    print("=== OVERFLOW TRACKING DEBUG ===")
+    print("Inside BG: " .. tostring(insideBG))
+    print("Overflow timer running: " .. tostring(overflowTrackingTimer ~= nil))
+    
+    if not insideBG then
+        print("Not in battleground - overflow tracking should be stopped")
+        print("===============================")
+        return
+    end
+    
+    local trackedPlayers = tCount(playerTracker.lastCheck)
+    print("Players being tracked: " .. trackedPlayers)
+    
+    if trackedPlayers == 0 then
+        print("*** WARNING: No players being tracked for overflow! ***")
+        print("This could indicate TrackPlayerStats() isn't running properly")
+    end
+    
+    -- Show current player's tracking data
+    local playerName = UnitName("player")
+    local playerRealm = GetRealmName() or "Unknown-Realm"
+    local playerKey = GetPlayerKey(playerName, playerRealm)
+    
+    print("")
+    print("YOUR TRACKING DATA:")
+    print("Player key: " .. playerKey)
+    
+    local yourLastCheck = playerTracker.lastCheck[playerKey]
+    local yourOverflows = playerTracker.overflowDetected[playerKey]
+    
+    if yourLastCheck then
+        print("Last recorded damage: " .. yourLastCheck.damage)
+        print("Last recorded healing: " .. yourLastCheck.healing)
+        print("Last check timestamp: " .. yourLastCheck.timestamp .. " (current: " .. GetTime() .. ")")
+        print("Time since last check: " .. math.floor(GetTime() - yourLastCheck.timestamp) .. " seconds")
+    else
+        print("*** NO TRACKING DATA FOR YOU! ***")
+        print("This means TrackPlayerStats() hasn't seen you yet")
+    end
+    
+    if yourOverflows then
+        print("Detected damage overflows: " .. yourOverflows.damageOverflows)
+        print("Detected healing overflows: " .. yourOverflows.healingOverflows)
+        
+        if yourOverflows.healingOverflows > 0 then
+            print("*** HEALING OVERFLOW DETECTED! ***")
+        end
+    else
+        print("No overflow data initialized for you")
+    end
+    
+    -- Get current scoreboard data to compare
+    local rows = GetNumBattlefieldScores()
+    if rows > 0 then
+        for i = 1, rows do
+            local success, s = pcall(C_PvP.GetScoreInfo, i)
+            if success and s and s.name then
+                local name, realm = s.name, ""
+                if s.name:find("-") then
+                    name, realm = s.name:match("^(.+)-(.+)$")
+                else
+                    realm = GetRealmName() or "Unknown-Realm"
+                end
+                
+                local key = GetPlayerKey(name, realm)
+                if key == playerKey then
+                    local currentDamage = s.damageDone or s.damage or 0
+                    local currentHealing = s.healingDone or s.healing or 0
+                    
+                    print("")
+                    print("CURRENT SCOREBOARD VALUES:")
+                    print("Current damage: " .. currentDamage)
+                    print("Current healing: " .. currentHealing)
+                    
+                    if yourLastCheck then
+                        print("Change since last check:")
+                        print("  Damage: " .. (currentDamage - yourLastCheck.damage))
+                        print("  Healing: " .. (currentHealing - yourLastCheck.healing))
+                        
+                        -- Check if this looks like an overflow
+                        if currentHealing < yourLastCheck.healing and yourLastCheck.healing > OVERFLOW_DETECTION_THRESHOLD then
+                            print("*** POTENTIAL OVERFLOW DETECTED NOW! ***")
+                            print("Previous healing (" .. yourLastCheck.healing .. ") was above threshold")
+                            print("Current healing (" .. currentHealing .. ") is lower")
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+    
+    print("===============================")
+end
+
+-- Function to manually run overflow detection right now
+function ForceOverflowCheck()
+    if not insideBG then
+        print("Not in a battleground")
+        return
+    end
+    
+    print("=== FORCING OVERFLOW CHECK ===")
+    print("Running TrackPlayerStats() manually...")
+    
+    TrackPlayerStats()
+    
+    print("Check complete. Run DebugOverflowStatus() to see results.")
+    print("==============================")
+end
+
+-- Enhanced overflow tracking with more frequent checks and better logging
+function StartEnhancedOverflowTracking()
+    if overflowTrackingTimer then
+        overflowTrackingTimer:Cancel()
+        Debug("Stopped existing overflow tracking")
+    end
+    
+    Debug("Starting ENHANCED overflow tracking (every 5 seconds)")
+    overflowTrackingTimer = C_Timer.NewTicker(5, function() -- Check every 5 seconds instead of 15
+        if insideBG then
+            TrackPlayerStats()
+        else
+            -- Auto-stop if we leave BG
+            StopOverflowTracking()
+        end
+    end)
+end
+
+-- Debug function to examine the stats table from GetScoreInfo
+function DebugPVPStatInfo()
+    if not insideBG then
+        print("Not in a battleground")
+        return
+    end
+    
+    local rows = GetNumBattlefieldScores()
+    if rows == 0 then
+        print("No battlefield score data available")
+        return
+    end
+    
+    print("=== PVP STAT INFO DEBUG ===")
+    
+    -- Get map info for context
+    local map = C_Map.GetBestMapForUnit("player") or 0
+    local mapInfo = C_Map.GetMapInfo(map)
+    local mapName = (mapInfo and mapInfo.name) or "Unknown"
+    print("Current Battleground: " .. mapName .. " (ID: " .. map .. ")")
+    print("")
+    
+    -- Examine first few players
+    for i = 1, math.min(3, rows) do
+        local success, s = pcall(C_PvP.GetScoreInfo, i)
+        if success and s and s.name then
+            print("Player " .. i .. ": " .. s.name)
+            
+            if s.stats then
+                print("  stats table found with " .. #s.stats .. " entries:")
+                
+                -- Sort by orderIndex for logical display
+                local sortedStats = {}
+                for j, stat in ipairs(s.stats) do
+                    table.insert(sortedStats, stat)
+                end
+                table.sort(sortedStats, function(a, b) 
+                    return (a.orderIndex or 999) < (b.orderIndex or 999) 
+                end)
+                
+                for j, stat in ipairs(sortedStats) do
+                    local statID = stat.pvpStatID or "nil"
+                    local statValue = stat.pvpStatValue or 0
+                    local orderIndex = stat.orderIndex or "nil"
+                    local name = stat.name or "nil"
+                    local tooltip = stat.tooltip or "nil"
+                    local iconName = stat.iconName or "nil"
+                    
+                    print(string.format("    [%d] ID:%s Value:%s Order:%s", 
+                        j, tostring(statID), tostring(statValue), tostring(orderIndex)))
+                    print(string.format("        Name: '%s'", name))
+                    print(string.format("        Tooltip: '%s'", tooltip))
+                    print(string.format("        Icon: '%s'", iconName))
+                    
+                    -- Highlight non-zero values
+                    if statValue > 0 then
+                        print("        *** NON-ZERO VALUE: " .. statValue .. " ***")
+                    end
+                    print("")
+                end
+            else
+                print("  *** NO STATS TABLE FOUND! ***")
+                print("  This might indicate the API doesn't return stats for this player/BG")
+            end
+            print("  ────────────────────────────────────")
+        else
+            print("Player " .. i .. ": Failed to get data")
+        end
+    end
+    
+    print("===========================")
+end
+
+-- Function to map common objective stat IDs to their meanings
+function DebugStatIDMappings()
+    print("=== STAT ID RESEARCH ===")
+    print("This function helps identify what different pvpStatID values mean")
+    print("Run DebugPVPStatInfo() first to see the actual IDs in your current BG")
+    print("")
+    print("Common patterns to look for:")
+    print("  - Flags captured/returned (CTF maps)")
+    print("  - Bases assaulted/defended (resource maps)")
+    print("  - Orb time/score (Temple of Kotmogu)")
+    print("  - Gates destroyed (Strand)")
+    print("  - Carts controlled (mines)")
+    print("  - Any stat with name containing 'objective' or 'goal'")
+    print("")
+    print("Look for stats where:")
+    print("  1. The 'name' field mentions objectives/flags/bases/etc")
+    print("  2. The 'pvpStatValue' is > 0 for players who did objectives")
+    print("  3. The 'tooltip' explains what the stat tracks")
+    print("======================")
+end
+
+-- Test the enhanced objective system with breakdown support
+function TestObjectiveBreakdownSystem()
+    if not insideBG then
+        print("Not in a battleground")
+        return
+    end
+    
+    local rows = GetNumBattlefieldScores()
+    if rows == 0 then
+        print("No battlefield score data available")
+        return
+    end
+    
+    print("=== TESTING OBJECTIVE BREAKDOWN SYSTEM ===")
+    
+    local map = C_Map.GetBestMapForUnit("player") or 0
+    local mapInfo = C_Map.GetMapInfo(map)
+    local mapName = (mapInfo and mapInfo.name) or "Unknown"
+    print("Battleground: " .. mapName)
+    print("")
+    
+    -- Collect sample data to test column determination
+    local samplePlayers = {}
+    for i = 1, math.min(5, rows) do
+        local success, s = pcall(C_PvP.GetScoreInfo, i)
+        if success and s and s.name then
+            local objectives, objectiveBreakdown = ExtractObjectiveData(s, mapName)
+            
+            local playerData = {
+                name = s.name,
+                objectives = objectives,
+                objectiveBreakdown = objectiveBreakdown or {}
+            }
+            table.insert(samplePlayers, playerData)
+            
+            print("Player: " .. s.name)
+            print("  Total objectives: " .. objectives)
+            if objectiveBreakdown and next(objectiveBreakdown) then
+                print("  Breakdown:")
+                for objType, value in pairs(objectiveBreakdown) do
+                    print("    " .. objType .. ": " .. value)
+                end
+            else
+                print("  No breakdown data")
+            end
+            print("")
+        end
+    end
+    
+    -- Test column determination
+    local recommendedColumns = GetObjectiveColumns(mapName, samplePlayers)
+    print("RECOMMENDED COLUMNS FOR UI:")
+    for i, col in ipairs(recommendedColumns) do
+        print("  " .. i .. ". " .. col.name .. " (" .. col.key .. ") - " .. col.tooltip)
+    end
+    print("")
+    
+    -- Test export format
+    print("SAMPLE EXPORT FORMAT:")
+    if #samplePlayers > 0 then
+        local testPlayer = samplePlayers[1]
+        local exportObjectiveData = {
+            total = testPlayer.objectives,
+            breakdown = testPlayer.objectiveBreakdown
+        }
+        print("  Player: " .. testPlayer.name)
+        print("  Objectives field for export:")
+        print("    total: " .. exportObjectiveData.total)
+        print("    breakdown: {")
+        for objType, value in pairs(exportObjectiveData.breakdown) do
+            print("      " .. objType .. ": " .. value .. ",")
+        end
+        print("    }")
+    end
+    
+    print("=========================================")
+end
+
+-- Test the new stats-based objective extraction
+function TestNewObjectiveExtraction()
+    if not insideBG then
+        print("Not in a battleground")
+        return
+    end
+    
+    local rows = GetNumBattlefieldScores()
+    if rows == 0 then
+        print("No battlefield score data available")
+        return
+    end
+    
+    print("=== TESTING NEW OBJECTIVE EXTRACTION ===")
+    
+    local map = C_Map.GetBestMapForUnit("player") or 0
+    local mapInfo = C_Map.GetMapInfo(map)
+    local mapName = (mapInfo and mapInfo.name) or "Unknown"
+    print("Battleground: " .. mapName)
+    print("")
+    
+    -- Test a few players
+    for i = 1, math.min(5, rows) do
+        local success, s = pcall(C_PvP.GetScoreInfo, i)
+        if success and s and s.name then
+            print("Player: " .. s.name)
+            
+            -- Old method result
+            local oldObjectives, oldBreakdown = ExtractObjectiveData(s, mapName)
+            print("  Old extraction method: " .. oldObjectives)
+            if oldBreakdown and next(oldBreakdown) then
+                print("    Breakdown:")
+                for objType, value in pairs(oldBreakdown) do
+                    print("      " .. objType .. ": " .. value)
+                end
+            end
+            
+            -- New method: scan stats table
+            local newObjectives = 0
+            local objectiveStats = {}
+            
+            if s.stats then
+                for _, stat in ipairs(s.stats) do
+                    local name = (stat.name or ""):lower()
+                    local value = stat.pvpStatValue or 0
+                    
+                    -- Look for objective-related stats based on common names
+                    if value > 0 and (
+                        name:find("flag") or name:find("capture") or name:find("return") or
+                        name:find("base") or name:find("assault") or name:find("defend") or
+                        name:find("orb") or name:find("gate") or name:find("cart") or
+                        name:find("objective") or name:find("goal") or
+                        name:find("tower") or name:find("graveyard") or name:find("mine")
+                    ) then
+                        newObjectives = newObjectives + value
+                        table.insert(objectiveStats, {
+                            name = stat.name,
+                            value = value,
+                            id = stat.pvpStatID
+                        })
+                    end
+                end
+            end
+            
+            print("  New extraction method: " .. newObjectives)
+            if #objectiveStats > 0 then
+                print("    Found objective stats:")
+                for _, objStat in ipairs(objectiveStats) do
+                    print("      - " .. objStat.name .. ": " .. objStat.value .. " (ID: " .. (objStat.id or "nil") .. ")")
+                end
+            end
+            
+            -- Compare results
+            if oldObjectives ~= newObjectives then
+                print("  *** METHODS DISAGREE! Old: " .. oldObjectives .. " vs New: " .. newObjectives .. " ***")
+            else
+                print("  Methods agree: " .. oldObjectives)
+            end
+            print("")
+        end
+    end
+    
+    print("=========================================")
+end
