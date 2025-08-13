@@ -63,6 +63,73 @@ local function DebugHashComponents(key)
     end
 end
 
+---------------------------------------------------------------------
+-- Golden Hash Test Vectors and Runner
+---------------------------------------------------------------------
+
+-- Predefined golden vectors. Expected hashes can be filled after running
+-- /bgdebug goldens once. Keep these in sync with HASH_SPEC.md and the website.
+local GOLDEN_VECTORS = {
+    {
+        name = "Vector 1 - Simple ASCII",
+        metadata = { battleground = "Warsong Gulch", duration = 180, winner = "Alliance" },
+        players = {
+            { name = "Alice", realm = "Stormrage", damage = 100000, healing = 5000 },
+            { name = "Bob",   realm = "Area-52",   damage = 80000,  healing = 0 }
+        },
+        expected = nil
+    },
+    {
+        name = "Vector 2 - Non-ASCII normalization",
+        metadata = { battleground = "Arathi Basin", duration = 900, winner = "Horde" },
+        players = {
+            { name = "Kìllah", realm = "Tichondrius", damage = 123456, healing = 7890 },
+            { name = "Änne",   realm = "Aegwynn",     damage = 654321, healing = 42 }
+        },
+        expected = nil
+    },
+    {
+        name = "Vector 3 - Sorting check",
+        metadata = { battleground = "Eye of the Storm", duration = 1200, winner = "Alliance" },
+        players = {
+            { name = "charlie",  realm = "Illidan", damage = 1, healing = 2 },
+            { name = "Charlie",  realm = "Illidan", damage = 3, healing = 4 },
+            { name = "Charlie.", realm = "Illidan", damage = 5, healing = 6 }
+        },
+        expected = nil
+    }
+}
+
+function BGLoggerDebug.RunGoldenHashTests()
+    print("=== BGLogger Golden Hash Tests ===")
+    if not GenerateDataHash then
+        print("GenerateDataHash not available")
+        return
+    end
+    for i, vec in ipairs(GOLDEN_VECTORS) do
+        local md = {
+            battleground = vec.metadata.battleground,
+            duration = vec.metadata.duration,
+            winner = vec.metadata.winner,
+            type = "non-rated",
+            date = "1970-01-01T00:00:00Z"
+        }
+        local hash = GenerateDataHash(md, vec.players)
+        local computed = (type(hash) == "table") and hash[1] or hash
+        print(string.format("%d) %s", i, vec.name))
+        print("   battleground: " .. md.battleground .. ", duration: " .. md.duration .. ", winner: " .. md.winner)
+        print("   players: " .. tostring(#vec.players))
+        print("   computed: " .. tostring(computed))
+        if vec.expected then
+            print("   expected: " .. tostring(vec.expected))
+            print("   match: " .. tostring(vec.expected == computed))
+        else
+            print("   expected: <not set> (update HASH_SPEC.md and GOLDEN_VECTORS after first run)")
+        end
+    end
+    print("=== End Golden Tests ===")
+end
+
 -- Debug function to show hash components
 function DebugHashComponents(key)
     if not BGLoggerDB[key] then
@@ -469,6 +536,8 @@ local function HandleDebugCommand(msg)
         chunkNum = chunkNum + 1
     end
     print("=== END HASH STRING ===")
+    elseif cmd == "goldens" then
+        BGLoggerDebug.RunGoldenHashTests()
     elseif cmd == "hashparts" then
     local key = param
     if not key or key == "" then
@@ -782,6 +851,7 @@ local function HandleDebugCommand(msg)
         print("  testhash - test hash generation")
         print("  checkhash [key] - check hash for entry")
         print("  hashcomponents [key] - debug hash components")
+		print("  goldens - run golden hash tests")
         print("  repair - fix database issues")
         print("  clearall - clear all data")
         print("  refresh - refresh window")

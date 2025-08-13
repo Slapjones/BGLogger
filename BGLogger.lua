@@ -47,6 +47,9 @@ local function Debug(msg)
     end
 end
 
+-- Expose debug printer for split modules
+_G.BGLogger_Debug = Debug
+
 -- Toggle debug mode for users
 local function ToggleDebugMode()
     DEBUG_MODE = not DEBUG_MODE
@@ -89,6 +92,8 @@ local function ResetPlayerTracker()
         playerTracker.initialPlayerList = {}
         playerTracker.finalPlayerList = {}
         playerTracker.initialListCaptured = false
+        playerTracker.initialCaptureRetried = false  -- Reset retry flag
+        playerTracker.firstAttemptStats = nil  -- Reset retry stats
         playerTracker.battleHasBegun = false
         playerTracker.detectedAFKers = {}
         playerTracker.damageHealing = {}
@@ -814,12 +819,21 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     end
     print("Using player realm: '" .. playerRealm .. "'")
     
+    local processedCount = 0
+    local skippedCount = 0
+    local keyCollisions = {}
+    
     for i = 1, rows do
         local success, s = pcall(C_PvP.GetScoreInfo, i)
-        if success and s and s.name then
-            local playerName, realmName = s.name, ""
+        if success and s then
+            print("Processing player " .. i .. ": " .. tostring(s.name or "NO_NAME"))
             
-            print("Processing player " .. i .. ": " .. s.name)
+            -- Check for incomplete data (common in AV with distant players)
+            if not s.name or s.name == "" then
+                print("  ⚠️ SKIPPED: Player has no name (distant player in AV?)")
+                skippedCount = skippedCount + 1
+            else
+                local playerName, realmName = s.name, ""
             
             if s.name:find("-") then
                 playerName, realmName = s.name:match("^(.+)-(.+)$")
@@ -852,6 +866,19 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
             
             local playerKey = GetPlayerKey(playerName, realmName)
             print("  Generated key: '" .. playerKey .. "'")
+            
+            -- Check for key collisions (happens with empty names in AV)
+            if playerTracker.initialPlayerList[playerKey] then
+                print("  ⚠️ KEY COLLISION: Key '" .. playerKey .. "' already exists!")
+                print("    Existing: " .. (playerTracker.initialPlayerList[playerKey].name or "nil"))
+                print("    New: " .. (playerName or "nil"))
+                keyCollisions[playerKey] = (keyCollisions[playerKey] or 0) + 1
+                
+                -- Generate unique key for collision
+                local uniqueKey = playerKey .. "_" .. i
+                playerKey = uniqueKey
+                print("    Using unique key: '" .. playerKey .. "'")
+            end
             
             -- Enhanced class detection (same logic as CollectScoreData)
             local className = ""
@@ -902,19 +929,96 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 rawRace = s.race
             }
             print("  ✓ Added to initial list: " .. className .. " " .. factionName)
+            processedCount = processedCount + 1
             
             -- Special check for current player
             if playerName == UnitName("player") then
                 print("  *** THIS IS THE CURRENT PLAYER ***")
             end
+            end
         else
             print("Failed to get score info for player " .. i)
+            skippedCount = skippedCount + 1
         end
     end
     
-    playerTracker.initialListCaptured = true
     local initialCount = tCount(playerTracker.initialPlayerList)
-    print("*** Initial capture COMPLETE: " .. initialCount .. " players stored ***")
+    
+    print("*** Initial capture COMPLETE ***")
+    print("  Total API entries: " .. rows)
+    print("  Successfully processed: " .. processedCount)
+    print("  Skipped (no name): " .. skippedCount)
+    print("  Final stored players: " .. initialCount)
+    
+    -- Show key collision information
+    if next(keyCollisions) then
+        print("  ⚠️ Key collisions detected:")
+        for key, count in pairs(keyCollisions) do
+            print("    '" .. key .. "': " .. count .. " collisions")
+        end
+    end
+    
+    -- Calculate data completeness ratio
+    local completenessRatio = processedCount / rows
+    local isLargeDisparity = skippedCount > 15 and completenessRatio < 0.7  -- More than 15 skipped AND less than 70% success rate
+    
+    -- Analysis for AV and retry logic
+    local currentMap = C_Map.GetBestMapForUnit("player") or 0
+    local mapInfo = C_Map.GetMapInfo(currentMap)
+    local mapName = (mapInfo and mapInfo.name) or "Unknown"
+    local isAV = mapName:lower():find("alterac")
+    
+    if isAV then
+        print("  📍 ALTERAC VALLEY DETECTED - Distance-based data limitations expected")
+        if skippedCount > 10 then
+            print("    High skip count (" .. skippedCount .. ") is normal in AV due to player distance")
+        end
+    end
+    
+    -- Smart retry logic for large disparities
+    if isLargeDisparity and not playerTracker.initialCaptureRetried then
+        print("  🔄 LARGE DISPARITY DETECTED (" .. math.floor(completenessRatio * 100) .. "% success rate)")
+        print("    Scheduling retry in 12 seconds to allow players to move closer...")
+        
+        -- Store first attempt stats for comparison
+        playerTracker.firstAttemptStats = {
+            rows = rows,
+            processed = processedCount,
+            skipped = skippedCount,
+            stored = initialCount
+        }
+        
+        playerTracker.initialCaptureRetried = true  -- Prevent infinite retries
+        playerTracker.initialListCaptured = false   -- Allow retry
+        
+        C_Timer.After(12, function()
+            if insideBG and not playerTracker.initialListCaptured then
+                print("🔄 *** RETRYING INITIAL CAPTURE (players should be closer now) ***")
+                CaptureInitialPlayerList(true)  -- Skip match start check since we know it's started
+            else
+                print("🔄 Retry cancelled - no longer in BG or already captured")
+            end
+        end)
+        
+        return  -- Exit early, don't mark as captured yet
+    end
+    
+    -- Show retry improvement stats if this was a retry
+    if playerTracker.firstAttemptStats then
+        local firstAttempt = playerTracker.firstAttemptStats
+        local improvement = initialCount - firstAttempt.stored
+        local newCompleteness = math.floor((processedCount / rows) * 100)
+        local oldCompleteness = math.floor((firstAttempt.processed / firstAttempt.rows) * 100)
+        
+        print("  📈 RETRY IMPROVEMENT:")
+        print("    First attempt: " .. firstAttempt.stored .. " players (" .. oldCompleteness .. "% success)")
+        print("    After retry: " .. initialCount .. " players (" .. newCompleteness .. "% success)")
+        print("    Improvement: +" .. improvement .. " players")
+        
+        playerTracker.firstAttemptStats = nil  -- Clear stats
+    end
+    
+    playerTracker.initialListCaptured = true
     
     -- Show first few players as verification with complete info
     local count = 0
@@ -1731,107 +1835,7 @@ end
 ---------------------------------------------------------------------
 -- Hash Generation Functions for BGLogger
 ---------------------------------------------------------------------
-
--- Simple hash function using built-in string.byte and math operations
-local function SimpleStringHash(str)
-    local hash = 5381
-    for i = 1, #str do
-        local byte = string.byte(str, i)
-        hash = ((hash * 33) + byte) % 2147483647
-    end
-    return string.format("%08X", hash)
-end
-
--- Generate hash from battleground data
-function GenerateDataHash(battlegroundMetadata, playerList)
-    Debug("GenerateDataHash called with " .. #playerList .. " players")
-    
-    -- Normalize string function to handle special characters
-    local function normalizeString(str)
-        if not str then return "" end
-        str = tostring(str)
-        
-        -- Replace all non-ASCII characters with underscore for consistency
-        local result = ""
-        for i = 1, #str do
-            local byte = string.byte(str, i)
-            if byte <= 127 then
-                -- Keep ASCII characters as-is
-                result = result .. string.char(byte)
-            else
-                -- Replace any non-ASCII character with underscore
-                result = result .. "_"
-            end
-        end
-        
-        return result
-    end
-    
-    -- Create simple string from key data
-    local parts = {}
-    
-    -- Add battleground info (normalize battleground name)
-    table.insert(parts, normalizeString(battlegroundMetadata.battleground or ""))
-    table.insert(parts, tostring(battlegroundMetadata.duration or 0))
-    table.insert(parts, normalizeString(battlegroundMetadata.winner or ""))
-    
-    -- Sort players by name for consistency
-    local sortedPlayers = {}
-    for _, player in ipairs(playerList) do
-        table.insert(sortedPlayers, player)
-    end
-    
-    table.sort(sortedPlayers, function(a, b)
-        local nameA = normalizeString(a.name or "")
-        local nameB = normalizeString(b.name or "")
-        return nameA < nameB
-    end)
-    
-    -- Add player data
-    for _, player in ipairs(sortedPlayers) do
-        local playerStr = normalizeString(player.name or "") .. "|" .. 
-                         normalizeString(player.realm or "") .. "|" .. 
-                         tostring(player.damage or 0) .. "|" .. 
-                         tostring(player.healing or 0)
-        table.insert(parts, playerStr)
-    end
-    
-    -- Generate hash
-    local dataString = table.concat(parts, "||")
-    local hash = SimpleStringHash(dataString)
-    
-    -- Simple metadata
-    local metadata = {
-        playerCount = #playerList,
-        algorithm = "simple_v1"
-    }
-    
-    Debug("Generated hash: " .. hash)
-    return hash, metadata
-end
-
--- Verify a hash against stored data (for debugging/validation)
-function VerifyDataHash(storedHash, battlegroundMetadata, playerList)
-    local regeneratedHash, metadata = GenerateDataHash(battlegroundMetadata, playerList)
-    local isValid = (storedHash == regeneratedHash)
-    
-    Debug("Hash verification: " .. (isValid and "VALID" or "INVALID"))
-    Debug("Stored: " .. tostring(storedHash))
-    Debug("Regenerated: " .. tostring(regeneratedHash))
-    
-    return isValid, regeneratedHash, metadata
-end
-
--- Extract battleground metadata from saved data for hash verification
-local function ExtractBattlegroundMetadata(data)
-    return {
-        battleground = data.battlegroundName or "Unknown Battleground",
-        duration = data.duration or 0,
-        winner = data.winner or "",
-        type = data.type or "non-rated",
-        date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ")
-    }
-end
+-- Moved to BGLogger_Hash.lua
 
 -- Enhanced battleground detection function
 local function UpdateBattlegroundStatus()
@@ -2443,131 +2447,11 @@ end
 -- Export Functions
 ---------------------------------------------------------------------
 
-function ExportBattleground(key)
-    Debug("ExportBattleground called for key: " .. tostring(key))
-    
-    -- Add safety check for nil key
-    if not key or key == "" then
-        print("|cff00ffffBGLogger:|r Error: No battleground key provided")
-        return
-    end
-    
-    if not BGLoggerDB[key] then
-        print("|cff00ffffBGLogger:|r No data found for battleground " .. tostring(key))
-        return
-    end
-    
-    local data = BGLoggerDB[key]
-    Debug("Found battleground data with " .. (#(data.stats or {})) .. " players")
-    
-    -- Check if integrity data exists (for backwards compatibility)
-    if not data.integrity and not ALLOW_TEST_EXPORTS then
-        print("|cff00ffffBGLogger:|r Warning: This battleground was saved without integrity data and cannot be exported safely.")
-        print("|cff00ffffBGLogger:|r Only battlegrounds saved with the updated addon can be uploaded to prevent data tampering.")
-        return
-    end
-    
-    -- Check if this is a brawl and warn user
-    if data.type == "brawl" then
-        print("|cff00ffffBGLogger:|r Warning: This is a BRAWL record.")
-        print("|cff00ffffBGLogger:|r Brawls use modified rules and should not be uploaded to the main battleground statistics website.")
-        print("|cff00ffffBGLogger:|r The export will be generated for debugging/archival purposes only.")
-        print("|cff00ffffBGLogger:|r Consider if you really want to export this brawl data.")
-    end
-    
-    local mapName = data.battlegroundName or "Unknown Battleground"
-    
-    -- Process players and convert numbers to strings to preserve precision
-    local exportPlayers = {}
-    local afkersList = {}
-    
-    for _, player in ipairs(data.stats or {}) do
-        -- Add to main player list
-        -- Prepare objective data for export
-        local objectiveData = {
-            total = player.objectives or 0,
-            breakdown = player.objectiveBreakdown or {}
-        }
-        
-        table.insert(exportPlayers, {
-            name = player.name,
-            realm = player.realm,
-            faction = player.faction or player.side,
-            class = player.class,
-            spec = player.spec,
-            damage = tostring(player.damage or player.dmg or 0),  -- Convert to string
-            healing = tostring(player.healing or player.heal or 0), -- Convert to string
-            kills = player.kills or player.killingBlows or player.kb or 0,
-            deaths = player.deaths or 0,
-            honorableKills = player.honorableKills or 0,
-            objectives = objectiveData, -- Enhanced objective data with breakdown
-            -- Enhanced participation data
-            isBackfill = player.isBackfill or false,
-            participationUnknown = player.participationUnknown or false,
-            -- Overflow tracking data (for debugging/validation)
-            damageOverflows = player.damageOverflows or 0,
-            healingOverflows = player.healingOverflows or 0
-        })
-    end
-    
-    -- Get AFKer list from stored data (AFKers who left and aren't in final stats)
-    if data.afkerList then
-        for _, afker in ipairs(data.afkerList) do
-            table.insert(afkersList, {
-                name = afker.name,
-                realm = afker.realm,
-                faction = "Unknown", -- We don't have this data for AFKers
-                class = "Unknown",   -- We don't have this data for AFKers
-                isBackfill = false   -- Could theoretically be true, but we'll keep it simple
-            })
-        end
-    end
-    
-    -- Convert to website-compatible JSON format
-    local exportData = {
-        battleground = mapName,
-        date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ"),
-        type = data.type or "non-rated",
-        duration = tostring(data.duration or 0), -- Legacy field
-        trueDuration = tostring(data.trueDuration or data.duration or 0), -- Preferred field for website
-        winner = data.winner or "",
-        players = exportPlayers,
-        afkers = afkersList, -- Separate AFKer list for website
-        integrity = data.integrity
-    }
-    
-    Debug("Export using pre-generated hash: " .. (data.integrity.hash or "missing"))
-    Debug("Export includes " .. #exportPlayers .. " total players, " .. #afkersList .. " AFKers")
-    
-    -- Count backfills in export data for debug
-    local backfillCount = 0
-    for _, player in ipairs(exportPlayers) do
-        if player.isBackfill then backfillCount = backfillCount + 1 end
-    end
-    Debug("Export includes " .. backfillCount .. " backfills")
-    
-    -- Generate JSON string
-    local success, jsonString = pcall(TableToJSON, exportData)
-    
-    if not success then
-        print("|cff00ffffBGLogger:|r Error generating JSON: " .. tostring(jsonString))
-        return
-    end
-    
-    Debug("JSON generated successfully with pre-generated integrity hash, length: " .. #jsonString)
-    
-    -- Create filename
-    local filename = string.format("BGLogger_%s_%s.json", 
-        mapName:gsub("%s+", "_"):gsub("[^%w_]", ""),
-        date("!%Y%m%d_%H%M%S")
-    )
-    
-    ShowJSONExportFrame(jsonString, filename)
-    
-    print("|cff00ffffBGLogger:|r Exported " .. mapName .. " with verified integrity hash")
-end
+-- ExportBattleground moved to BGLogger_Export.lua
 
 -- Convert Lua table to JSON string
+-- TableToJSON moved to BGLogger_Export.lua
+if not TableToJSON then
 function TableToJSON(tbl, indent)
     indent = indent or 0
     local spacing = string.rep("  ", indent)
@@ -2632,8 +2516,11 @@ function TableToJSON(tbl, indent)
         return table.concat(parts)
     end
 end
+end
 
 -- Show JSON export frame with read-only text
+-- ShowJSONExportFrame moved to BGLogger_Export.lua
+if not ShowJSONExportFrame then
 function ShowJSONExportFrame(jsonString, filename)
     Debug("ShowJSONExportFrame called with " .. #jsonString .. " characters")
     
@@ -2776,8 +2663,9 @@ function ShowJSONExportFrame(jsonString, filename)
     
     Debug("JSON export frame shown with read-only " .. #jsonString .. " characters")
 end
+end
 
--- Show export menu
+-- Show export menu (uses Export* functions from BGLogger_Export.lua)
 function ShowExportMenu()
     local menu = {
         {
@@ -2793,7 +2681,13 @@ function ShowExportMenu()
         },
         {
             text = "Export All Battlegrounds",
-            func = ExportAllBattlegrounds
+            func = function()
+                if ExportAllBattlegrounds then
+                    ExportAllBattlegrounds()
+                else
+                    print("|cff00ffffBGLogger:|r ExportAllBattlegrounds not available")
+                end
+            end
         },
         {
             text = "Cancel",
@@ -3692,11 +3586,35 @@ SlashCmdList.BGLOGGER = function(msg)
         end
         TestObjectiveBreakdownSystem()
         return
+    elseif command == "testretry" then
+        if not insideBG then
+            print("|cff00ffffBGLogger:|r Not in a battleground")
+            return
+        end
+        -- Force a retry scenario for testing
+        print("|cff00ffffBGLogger:|r Simulating large disparity to test retry logic...")
+        playerTracker.initialListCaptured = false
+        playerTracker.initialCaptureRetried = false
+        
+        -- Simulate the retry logic
+        print("🔄 SIMULATED LARGE DISPARITY - Scheduling retry in 3 seconds for testing...")
+        playerTracker.initialCaptureRetried = true
+        
+        C_Timer.After(3, function()
+            if insideBG and not playerTracker.initialListCaptured then
+                print("🔄 *** TEST RETRY TRIGGERED ***")
+                CaptureInitialPlayerList(true)
+            else
+                print("🔄 Test retry cancelled")
+            end
+        end)
+        return
     elseif command == "help" then
         print("|cff00ffffBGLogger Commands:|r")
         print("|cffffffff/bgstats|r or |cffffffff/bglogger|r - Open/close BGLogger window")
         print("|cffffffff/bglogger debug|r - Toggle debug mode on/off")
         print("|cffffffff/bglogger testbreakdown|r - Test new objective breakdown system (in BG only)")
+        print("|cffffffff/bglogger testretry|r - Test initial capture retry logic (in BG only)")
         print("|cffffffff/bglogger help|r - Show this help")
         return
     end
