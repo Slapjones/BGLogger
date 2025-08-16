@@ -24,6 +24,10 @@ local OVERFLOW_DETECTION_THRESHOLD = UINT32_LIMIT * 0.8  -- Detect when approach
 -- Overflow tracking timer
 local overflowTrackingTimer = nil
 
+-- Persisted per-battleground mapping of PVPStatID -> objective type
+BGLoggerDB.__ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap or {}
+local ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap
+
 ---------------------------------------------------------------------
 -- Simple Player List Tracking
 ---------------------------------------------------------------------
@@ -79,9 +83,11 @@ end
 ---------------------------------------------------------------------
 
 -- Helper function to count table entries
-local function tCount(t)
+local function tCount(tbl)
     local count = 0
-    for _ in pairs(t) do count = count + 1 end
+    for _ in pairs(tbl or {}) do
+        count = count + 1
+    end
     return count
 end
 
@@ -265,7 +271,14 @@ local function ExtractObjectiveDataFromStats(scoreData)
             statName:find("goal") or statName:find("objective")
         )
         
-        if isObjectiveStat and statValue > 0 then
+        -- Learn from historical mapping if available for this statID
+        local learnedType = ObjectiveIdMap[statID]
+        if learnedType and statValue > 0 then
+            totalObjectives = totalObjectives + statValue
+            objectiveBreakdown[learnedType] = (objectiveBreakdown[learnedType] or 0) + statValue
+            table.insert(foundStats, { name = originalName, value = statValue, id = statID, type = learnedType })
+            Debug("Found objective via learned mapping: ID " .. tostring(statID) .. " -> " .. learnedType .. " = " .. statValue)
+        elseif isObjectiveStat and statValue > 0 then
             totalObjectives = totalObjectives + statValue
             
             -- Categorize the objective type based on name
@@ -316,6 +329,8 @@ local function ExtractObjectiveDataFromStats(scoreData)
                 type = objectiveType
             })
             Debug("Found objective stat: " .. originalName .. " = " .. statValue .. " -> " .. objectiveType .. " (ID: " .. tostring(statID) .. ")")
+            -- Store learned mapping for future clarity
+            ObjectiveIdMap[statID] = objectiveType
         end
     end
     
@@ -2165,7 +2180,7 @@ local function CommitMatch(list)
             local timeSinceBGStart = math.floor(currentTime - bgStartTime)
             
             -- Safety check for fallback duration
-            if timeSinceBGStart > 0 and timeSinceStart < 7200 then -- Reasonable duration
+            if timeSinceBGStart > 0 and timeSinceBGStart < 7200 then -- Reasonable duration
                 trueDuration = timeSinceBGStart
                 durationSource = "calculated_fallback"
                 Debug("Using fallback duration from bgStartTime: " .. trueDuration .. " seconds")
@@ -2177,6 +2192,10 @@ local function CommitMatch(list)
             end
             
             duration = trueDuration
+            if playerTracker.joinedInProgress then
+                -- User joined late: mark duration as unreliable unless API provided it
+                Debug("Joined in-progress: duration is a fallback estimate")
+            end
         end
         
         Debug("Final duration: " .. duration .. " seconds (source: " .. durationSource .. ")")
@@ -2277,6 +2296,7 @@ local function CommitMatch(list)
             afkerList = playerTracker.detectedAFKers or {},
             joinedInProgress = playerTracker.joinedInProgress or false,
             playerJoinedInProgress = playerTracker.playerJoinedInProgress or false,
+            validForStats = not (playerTracker.joinedInProgress or false),
             
             -- INTEGRITY DATA - Generated at save time, not export time
             integrity = {

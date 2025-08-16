@@ -232,7 +232,10 @@ function ExportBattleground(key)
 		winner = data.winner or "",
 		players = exportPlayers,
 		afkers = afkersList,
-		integrity = data.integrity
+		integrity = data.integrity,
+		joinedInProgress = data.joinedInProgress or false,
+		playerJoinedInProgress = data.playerJoinedInProgress or false,
+		validForStats = data.validForStats or false
 	}
 
 	D("Export using pre-generated hash: " .. (data.integrity and data.integrity.hash or "missing"))
@@ -243,6 +246,12 @@ function ExportBattleground(key)
 	if not success then
 		print("|cff00ffffBGLogger:|r Error generating JSON: " .. tostring(jsonString))
 		return
+	end
+
+	-- If user joined in-progress, warn they cannot upload as a valid log
+	if (data.joinedInProgress or false) and not ALLOW_TEST_EXPORTS then
+		print("|cffff8800BGLogger:|r This record was created after joining an in-progress BG.")
+		print("|cffff8800BGLogger:|r It includes your backfill completion flag but is not valid for stats upload.")
 	end
 
 	D("JSON generated successfully with pre-generated integrity hash, length: " .. #jsonString)

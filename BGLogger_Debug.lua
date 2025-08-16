@@ -824,6 +824,19 @@ local function HandleDebugCommand(msg)
         else
             print("DebugCollectScoreData function not available")
         end
+    elseif cmd == "objmap" then
+        local map = _G.C_Map.GetBestMapForUnit("player") or 0
+        local mapInfo = _G.C_Map.GetMapInfo(map)
+        local mapName = (mapInfo and mapInfo.name) or "Unknown"
+        local idMap = _G.BGLoggerDB and _G.BGLoggerDB.__ObjectiveIdMap or {}
+        print("=== Objective ID Mappings (" .. mapName .. ") ===")
+        local count = 0
+        for id, typ in pairs(idMap) do
+            print("  ID " .. tostring(id) .. " -> " .. tostring(typ))
+            count = count + 1
+            if count >= 30 then print("  ...more exist; showing first 30") break end
+        end
+        if count == 0 then print("  (none learned yet)") end
         
     elseif cmd == "trackstatus" then
         if _G.CheckTrackingStatus then
