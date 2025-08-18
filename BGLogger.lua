@@ -984,19 +984,26 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     local currentMap = C_Map.GetBestMapForUnit("player") or 0
     local mapInfo = C_Map.GetMapInfo(currentMap)
     local mapName = (mapInfo and mapInfo.name) or "Unknown"
-    local isAV = mapName:lower():find("alterac")
-    
-    if isAV then
-        print("  📍 ALTERAC VALLEY DETECTED - Distance-based data limitations expected")
+    local lowerMap = mapName:lower()
+    local isEpicMap = (
+        lowerMap:find("alterac") or -- Alterac Valley
+        lowerMap:find("isle of conquest") or -- IoC
+        lowerMap:find("wintergrasp") or -- Wintergrasp
+        lowerMap:find("ashran") -- Ashran
+    ) and true or false
+
+    if isEpicMap then
+        print("  📍 EPIC BG DETECTED - Distance-based data limitations expected (" .. mapName .. ")")
         if skippedCount > 10 then
-            print("    High skip count (" .. skippedCount .. ") is normal in AV due to player distance")
+            print("    High skip count (" .. skippedCount .. ") is common due to player distance across the large map")
         end
     end
     
     -- Smart retry logic for large disparities
     if isLargeDisparity and not playerTracker.initialCaptureRetried then
         print("  🔄 LARGE DISPARITY DETECTED (" .. math.floor(completenessRatio * 100) .. "% success rate)")
-        print("    Scheduling retry in 12 seconds to allow players to move closer...")
+        local retryDelay = isEpicMap and 18 or 12
+        print("    Scheduling retry in " .. retryDelay .. " seconds to allow players to move closer...")
         
         -- Store first attempt stats for comparison
         playerTracker.firstAttemptStats = {
@@ -1009,7 +1016,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         playerTracker.initialCaptureRetried = true  -- Prevent infinite retries
         playerTracker.initialListCaptured = false   -- Allow retry
         
-        C_Timer.After(12, function()
+        C_Timer.After(retryDelay, function()
             if insideBG and not playerTracker.initialListCaptured then
                 print("🔄 *** RETRYING INITIAL CAPTURE (players should be closer now) ***")
                 CaptureInitialPlayerList(true)  -- Skip match start check since we know it's started
