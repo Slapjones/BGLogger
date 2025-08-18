@@ -12,59 +12,54 @@ function TableToJSON(tbl, indent)
 	indent = indent or 0
 	local spacing = string.rep("  ", indent)
 
-	if type(tbl) == "table" then
-		-- Detect array-like tables
-		local isArray = true
-		local arraySize = #tbl
-		for k, _ in pairs(tbl) do
-			if type(k) ~= "number" or k < 1 or k > arraySize then
-				isArray = false
-				break
-			end
-		end
-
-		local parts = {}
-		if isArray then
-			table.insert(parts, "[")
-			for i = 1, arraySize do
-				if tbl[i] ~= nil then
-					table.insert(parts, spacing .. "  " .. TableToJSON(tbl[i], indent + 1))
-					if i < arraySize and tbl[i+1] ~= nil then
-						table.insert(parts, ",")
-					end
-				end
-			end
-			table.insert(parts, "\n" .. spacing .. "]")
-			return table.concat(parts, "\n")
-		else
-			-- Object-like table
-			table.insert(parts, "{")
-			local keys = {}
-			for k in pairs(tbl) do table.insert(keys, k) end
-			table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-			for i, k in ipairs(keys) do
-				local v = tbl[k]
-				table.insert(parts, spacing .. '  "' .. tostring(k) .. '": ' .. TableToJSON(v, indent + 1))
-				if i < #keys then
-					table.insert(parts, ",")
-				end
-			end
-			table.insert(parts, "\n" .. spacing .. "}")
-			return table.concat(parts, "\n")
-		end
-	elseif type(tbl) == "string" then
-		-- Escape special characters for JSON
-		local escaped = tbl
-		escaped = escaped:gsub('\\', '\\\\')
-		escaped = escaped:gsub('"', '\\"')
-		escaped = escaped:gsub('\n', '\\n')
+	-- Scalars first
+	if type(tbl) == "string" then
+		local escaped = tbl:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n')
 		return '"' .. escaped .. '"'
 	elseif type(tbl) == "number" or type(tbl) == "boolean" then
 		return tostring(tbl)
 	elseif tbl == nil then
 		return "null"
-	else
+	elseif type(tbl) ~= "table" then
 		return '"' .. tostring(tbl) .. '"'
+	end
+
+	-- Detect array-like tables
+	local isArray = true
+	local arraySize = 0
+	for k, _ in pairs(tbl) do
+		if type(k) ~= "number" then
+			isArray = false
+			break
+		end
+		if k > arraySize then arraySize = k end
+	end
+
+	local parts = {}
+	if isArray then
+		table.insert(parts, "[\n")
+		local first = true
+		for i = 1, arraySize do
+			if tbl[i] ~= nil then
+				if not first then table.insert(parts, ",\n") end
+				first = false
+				table.insert(parts, spacing .. "  " .. TableToJSON(tbl[i], indent + 1))
+			end
+		end
+		table.insert(parts, "\n" .. spacing .. "]")
+		return table.concat(parts)
+	else
+		table.insert(parts, "{\n")
+		local keys = {}
+		for k in pairs(tbl) do table.insert(keys, k) end
+		table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+		for idx, k in ipairs(keys) do
+			if idx > 1 then table.insert(parts, ",\n") end
+			local v = tbl[k]
+			table.insert(parts, spacing .. '  "' .. tostring(k) .. '": ' .. TableToJSON(v, indent + 1))
+		end
+		table.insert(parts, "\n" .. spacing .. "}")
+		return table.concat(parts)
 	end
 end
 
@@ -217,8 +212,18 @@ function ExportBattleground(key)
 			objectiveBreakdown = objectiveData.breakdown,
 			isBackfill = player.isBackfill or false
 		})
-		if player.isAFKer then
-			table.insert(afkersList, { name = player.name, realm = player.realm })
+		-- Note: AFKers generally won't be present in final stats; we read them from data.afkerList below
+	end
+
+	-- Include AFKers from saved list (players present at start but not on final scoreboard)
+	if data.afkerList and type(data.afkerList) == "table" then
+		for _, afker in ipairs(data.afkerList) do
+			table.insert(afkersList, {
+				name = afker.name,
+				realm = afker.realm,
+				faction = afker.faction or "Unknown",
+				class = afker.class or "Unknown"
+			})
 		end
 	end
 

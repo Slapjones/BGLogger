@@ -268,7 +268,8 @@ local function ExtractObjectiveDataFromStats(scoreData)
             statName:find("mine") or statName:find("node") or 
             statName:find("azerite") or statName:find("structure") or
             statName:find("demolisher") or statName:find("vehicle") or
-            statName:find("goal") or statName:find("objective")
+            statName:find("goal") or statName:find("objective") or
+            statName:find("crystal") or statName:find("shard") or statName:find("deposit")
         )
         
         -- Learn from historical mapping if available for this statID
@@ -305,6 +306,8 @@ local function ExtractObjectiveDataFromStats(scoreData)
                 objectiveType = "gatesDefended"
             elseif statName:find("cart") then
                 objectiveType = "cartsControlled"
+            elseif statName:find("crystal") or statName:find("shard") or statName:find("deposit") then
+                objectiveType = "crystalsCaptured"
             elseif statName:find("orb") then
                 objectiveType = "orbScore"
             elseif statName:find("azerite") then
@@ -2535,7 +2538,7 @@ function TableToJSON(tbl, indent)
         table.insert(parts, spacing .. "}")
         return table.concat(parts)
     end
-end
+    end
 end
 
 -- Show JSON export frame with read-only text
@@ -3821,70 +3824,75 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             initialPlayerCount = 0 -- Reset player count tracking
             StartOverflowTracking() -- Start monitoring for overflow
             
-            -- CRITICAL: Check immediately if this is an in-progress BG
-            C_Timer.After(2, function() -- Small delay to let APIs populate
-                if insideBG then -- Make sure we're still in BG
-                    local isInProgressBG = false
-                    local detectionMethod = "none"
-                    
-                    -- Method 1: Check API duration (most reliable)
-                    if C_PvP and C_PvP.GetActiveMatchDuration then
-                        local apiDuration = C_PvP.GetActiveMatchDuration()
-                        if apiDuration and apiDuration > 30 then -- Match has been running for >30 seconds
-                            isInProgressBG = true
-                            detectionMethod = "API_duration_" .. apiDuration .. "s"
-                            Debug("IN-PROGRESS BG detected via API duration: " .. apiDuration .. " seconds")
-                        end
-                    end
-                    
-                    -- Method 2: Check if both teams are immediately visible (fallback)
-                    if not isInProgressBG then
-                        local rows = GetNumBattlefieldScores()
-                        if rows > 0 then
-                            local allianceCount, hordeCount = 0, 0
-                            for i = 1, math.min(rows, 10) do
-                                local success, s = pcall(C_PvP.GetScoreInfo, i)
-                                if success and s and s.name then
-                                    if s.faction == 0 then
-                                        hordeCount = hordeCount + 1
-                                    elseif s.faction == 1 then
-                                        allianceCount = allianceCount + 1
-                                    end
-                                end
-                            end
-                            
-                            -- If both teams visible immediately, likely in-progress
-                            if allianceCount > 0 and hordeCount > 0 and rows > 15 then
-                                isInProgressBG = true
-                                detectionMethod = "both_teams_visible_immediately"
-                                Debug("IN-PROGRESS BG detected via immediate team visibility")
-                            end
-                        end
-                    end
-                    
-                    if isInProgressBG then
-                        print("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
-                        print("Detection method: " .. detectionMethod)
-                        print("Player joined an ongoing match - adjusting tracking behavior")
-                        
-                        -- Set flags to indicate this is an in-progress join
-                        playerTracker.joinedInProgress = true
-                        playerTracker.battleHasBegun = true -- Match has obviously started
-                        
-                        -- Capture current state as "initial" list (best we can do)
-                        print("*** Capturing current player state as baseline (in-progress join) ***")
-                        CaptureInitialPlayerList(true) -- Skip match start validation
-                        
-                        -- Mark the player themselves as potentially a backfill
-                        -- (This will be used later in analysis)
-                        playerTracker.playerJoinedInProgress = true
-                        
-                    else
-                        Debug("Normal BG join detected - waiting for match to start")
-                        Debug("Waiting for match to start before capturing initial player list")
+            -- CRITICAL: Check immediately if this is an in-progress BG (with a few retries)
+            local function CheckInProgress(attempt)
+                attempt = attempt or 1
+                if not insideBG then return end
+                local isInProgressBG = false
+                local detectionMethod = "none"
+
+                -- Method 1: Check API duration (most reliable)
+                if C_PvP and C_PvP.GetActiveMatchDuration then
+                    local apiDuration = C_PvP.GetActiveMatchDuration() or 0
+                    if apiDuration > 0 then -- Any positive duration means match already started
+                        isInProgressBG = true
+                        detectionMethod = "API_duration_" .. apiDuration .. "s"
+                        Debug("IN-PROGRESS BG detected via API duration: " .. apiDuration .. " seconds (attempt " .. attempt .. ")")
                     end
                 end
-            end)
+
+                -- Method 2: Check if both teams are immediately visible (fallback)
+                if not isInProgressBG then
+                    local rows = GetNumBattlefieldScores()
+                    if rows > 0 then
+                        local allianceCount, hordeCount = 0, 0
+                        for i = 1, math.min(rows, 20) do
+                            local success, s = pcall(C_PvP.GetScoreInfo, i)
+                            if success and s and s.name then
+                                if s.faction == 0 then
+                                    hordeCount = hordeCount + 1
+                                elseif s.faction == 1 then
+                                    allianceCount = allianceCount + 1
+                                end
+                            end
+                        end
+                        -- If both teams visible immediately, likely in-progress
+                        if allianceCount > 0 and hordeCount > 0 then
+                            isInProgressBG = true
+                            detectionMethod = "both_teams_visible_immediately"
+                            Debug("IN-PROGRESS BG detected via immediate team visibility (attempt " .. attempt .. ")")
+                        end
+                    end
+                end
+
+                if isInProgressBG then
+                    print("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
+                    print("Detection method: " .. detectionMethod)
+                    print("Player joined an ongoing match - adjusting tracking behavior")
+
+                    -- Set flags to indicate this is an in-progress join
+                    playerTracker.joinedInProgress = true
+                    playerTracker.battleHasBegun = true -- Match has obviously started
+
+                    -- Capture current state as "initial" list (best we can do)
+                    print("*** Capturing current player state as baseline (in-progress join) ***")
+                    CaptureInitialPlayerList(true) -- Skip match start validation
+
+                    -- Mark the player themselves as a backfill candidate
+                    playerTracker.playerJoinedInProgress = true
+                    return
+                end
+
+                -- Retry a couple more times in case APIs/scoreboard were not ready yet
+                if attempt < 3 then
+                    local delays = { 2, 5, 10 }
+                    C_Timer.After(delays[attempt + 1] or 5, function() CheckInProgress(attempt + 1) end)
+                else
+                    Debug("Normal BG join detected - waiting for match to start")
+                    Debug("Waiting for match to start before capturing initial player list")
+                end
+            end
+            C_Timer.After(2, function() CheckInProgress(1) end)
             
             -- Fallback: Set battleHasBegun flag after reasonable delay if no chat message comes
             C_Timer.After(90, function() -- 1.5 minutes after entering BG
@@ -3990,23 +3998,44 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         print("Inside BG: " .. tostring(insideBG))
         print("Initial list captured: " .. tostring(playerTracker.initialListCaptured))
         
-        -- Try to get match state from API if parameter is nil
+        -- Resolve actual match state early
         local actualMatchState = matchState
         if not actualMatchState and C_PvP and C_PvP.GetActiveMatchState then
             actualMatchState = C_PvP.GetActiveMatchState()
             print("Got match state from API: '" .. tostring(actualMatchState) .. "'")
         end
         
-        -- PVP_MATCH_STATE_CHANGED fires for multiple events (enter BG, preparation, match start, etc.)
-        -- We need to be VERY selective about when to capture the initial list
+        -- If this update indicates the match is ending/ended, prioritize save and exit
+        if actualMatchState == "complete" or actualMatchState == "finished" or actualMatchState == "ended" or 
+           actualMatchState == "concluded" or actualMatchState == "done" then
+            if not matchSaved then
+                local timeSinceStart = GetTime() - bgStartTime
+                if timeSinceStart > MIN_BG_TIME then
+                    Debug("BG END DETECTED via PVP_MATCH_STATE_CHANGED")
+                    RequestBattlefieldScoreData()
+                    C_Timer.After(1, function()
+                        AttemptSaveWithRetry("PVP_MATCH_STATE_CHANGED")
+                    end)
+                end
+            end
+            return -- Do not attempt initial capture on end-state transitions
+        end
+
+        -- Only attempt initial capture during the early phase of a match
         if not playerTracker.initialListCaptured then
             print("*** PVP_MATCH_STATE_CHANGED detected, checking if match has truly started ***")
             
-            -- Add a longer delay to ensure we're not in preparation phase
-            C_Timer.After(8, function() -- Increased from 3 to 8 seconds
+            C_Timer.After(8, function()
                 print("*** PVP_MATCH_STATE_CHANGED timer callback - checking match status ***")
                 print("Current insideBG: " .. tostring(insideBG))
                 print("Current initialListCaptured: " .. tostring(playerTracker.initialListCaptured))
+
+                -- Guard against very late captures near the end of a match
+                local timeSinceStart = GetTime() - bgStartTime
+                if timeSinceStart >= 120 then
+                    print("*** SKIPPING initial capture: more than 120s since start ***")
+                    return
+                end
                 
                 if insideBG and not playerTracker.initialListCaptured then
                     -- Check API duration first (most reliable)
@@ -4014,8 +4043,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     if C_PvP and C_PvP.GetActiveMatchDuration then
                         apiDuration = C_PvP.GetActiveMatchDuration() or 0
                         print("API match duration: " .. apiDuration .. " seconds")
-                        
-                        -- If API shows duration > 0, battle has definitely begun
                         if apiDuration > 0 then
                             print("*** BATTLE HAS BEGUN detected via API duration: " .. apiDuration .. "s ***")
                             playerTracker.battleHasBegun = true
@@ -4030,41 +4057,22 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     local numPlayers = GetNumBattlefieldScores()
                     print("Current player count: " .. numPlayers)
                     
-                    if matchHasStarted then -- Trust the conservative validation
+                    if matchHasStarted then
                         print("*** MATCH CONFIRMED STARTED - Calling CaptureInitialPlayerList ***")
                         Debug("MATCH START CONFIRMED via conservative PVP_MATCH_STATE_CHANGED validation")
-                        CaptureInitialPlayerList(false) -- Use validation since we want to be sure
+                        CaptureInitialPlayerList(false)
                     else
                         print("*** MATCH NOT YET STARTED - Conservative validation failed ***")
                         print("  - Conservative IsMatchStarted() returned false")
                     end
                 else
                     print("*** CONDITIONS NOT MET ***")
-                    if not insideBG then
-                        print("  - Not in BG anymore")
-                    end
-                    if playerTracker.initialListCaptured then
-                        print("  - Initial list already captured")
-                    end
+                    if not insideBG then print("  - Not in BG anymore") end
+                    if playerTracker.initialListCaptured then print("  - Initial list already captured") end
                 end
             end)
         else
             print("*** Initial list already captured, ignoring this PVP_MATCH_STATE_CHANGED event ***")
-        end
-        
-        -- Also check for match end states if we have a valid state
-        if actualMatchState == "complete" or actualMatchState == "finished" or actualMatchState == "ended" or 
-           actualMatchState == "concluded" or actualMatchState == "done" then
-            if not matchSaved then
-                local timeSinceStart = GetTime() - bgStartTime
-                if timeSinceStart > MIN_BG_TIME then
-                    Debug("BG END DETECTED via PVP_MATCH_STATE_CHANGED")
-                    RequestBattlefieldScoreData()
-                    C_Timer.After(1, function()
-                        AttemptSaveWithRetry("PVP_MATCH_STATE_CHANGED")
-                    end)
-                end
-            end
         end
 
 
