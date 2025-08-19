@@ -119,6 +119,25 @@ local function GetPlayerKey(name, realm)
     return (name or "Unknown") .. "-" .. (realm or "Unknown")
 end
 
+-- Determine if current battleground is an Epic BG where enemy team may be far away
+local function IsEpicBattleground()
+    local mapId = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0
+    local info = mapId and C_Map.GetMapInfo and C_Map.GetMapInfo(mapId) or nil
+    local name = (info and info.name or ""):lower()
+    if name == "" then return false end
+    return name:find("alterac") or name:find("isle of conquest") or name:find("wintergrasp") or name:find("ashran") or false
+end
+
+-- Count factions within a keyed player table { key -> { faction = "Alliance"|"Horde" } }
+local function CountFactionsInTable(playerTable)
+    local allianceCount, hordeCount = 0, 0
+    for _, p in pairs(playerTable or {}) do
+        if p and p.faction == "Alliance" then allianceCount = allianceCount + 1
+        elseif p and p.faction == "Horde" then hordeCount = hordeCount + 1 end
+    end
+    return allianceCount, hordeCount
+end
+
 -- Format text to fit exactly in a fixed width, centered
 local function FixedWidthCenter(text, width)
     text = tostring(text or "")
@@ -768,11 +787,11 @@ local function IsMatchStarted()
     end
     
     local bothFactionsVisible = (allianceCount > 0 and hordeCount > 0)
-    local hasMinimumPlayers = (rows >= 15)
+    local hasMinimumPlayers = (rows >= (IsEpicBattleground() and 10 or 15))
     
     -- REQUIREMENT 4: Minimum time since entering BG (prevent instant capture)
     local timeSinceEntered = GetTime() - bgStartTime
-    local minimumWaitTime = 45 -- Wait at least 45 seconds after entering BG
+    local minimumWaitTime = IsEpicBattleground() and 20 or 45 -- Shorter for epics; enemy team is far but duration confirms start
     
     print("Match start requirements check:")
     print("  Battle begun message: " .. tostring(playerTracker.battleHasBegun))
@@ -977,21 +996,15 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     end
     
     -- Calculate data completeness ratio
-    local completenessRatio = processedCount / rows
+    local completenessRatio = rows > 0 and (processedCount / rows) or 0
     local isLargeDisparity = skippedCount > 15 and completenessRatio < 0.7  -- More than 15 skipped AND less than 70% success rate
     
     -- Analysis for AV and retry logic
+    local isEpicMap = IsEpicBattleground()
     local currentMap = C_Map.GetBestMapForUnit("player") or 0
     local mapInfo = C_Map.GetMapInfo(currentMap)
     local mapName = (mapInfo and mapInfo.name) or "Unknown"
-    local lowerMap = mapName:lower()
-    local isEpicMap = (
-        lowerMap:find("alterac") or -- Alterac Valley
-        lowerMap:find("isle of conquest") or -- IoC
-        lowerMap:find("wintergrasp") or -- Wintergrasp
-        lowerMap:find("ashran") -- Ashran
-    ) and true or false
-
+    
     if isEpicMap then
         print("  📍 EPIC BG DETECTED - Distance-based data limitations expected (" .. mapName .. ")")
         if skippedCount > 10 then
@@ -1002,8 +1015,8 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     -- Smart retry logic for large disparities
     if isLargeDisparity and not playerTracker.initialCaptureRetried then
         print("  🔄 LARGE DISPARITY DETECTED (" .. math.floor(completenessRatio * 100) .. "% success rate)")
-        local retryDelay = isEpicMap and 18 or 12
-        print("    Scheduling retry in " .. retryDelay .. " seconds to allow players to move closer...")
+        local retryDelay = isEpicMap and 25 or 12
+        print("    Scheduling retry in " .. retryDelay .. " seconds to allow players to move closer (epic=" .. tostring(isEpicMap) .. ")...")
         
         -- Store first attempt stats for comparison
         playerTracker.firstAttemptStats = {
@@ -1018,8 +1031,16 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         
         C_Timer.After(retryDelay, function()
             if insideBG and not playerTracker.initialListCaptured then
+                -- Force a fresh scoreboard update before retrying
+                RequestBattlefieldScoreData()
+                C_Timer.After(1.0, function()
+            if insideBG and not playerTracker.initialListCaptured then
                 print("🔄 *** RETRYING INITIAL CAPTURE (players should be closer now) ***")
                 CaptureInitialPlayerList(true)  -- Skip match start check since we know it's started
+                    else
+                        print("🔄 Retry cancelled after refresh - no longer in BG or already captured")
+                    end
+                end)
             else
                 print("🔄 Retry cancelled - no longer in BG or already captured")
             end
@@ -1043,6 +1064,46 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         playerTracker.firstAttemptStats = nil  -- Clear stats
     end
     
+    -- If on epic battlegrounds and both factions are not represented, do one immediate refresh attempt
+    if IsEpicBattleground() then
+        local aCount, hCount = CountFactionsInTable(playerTracker.initialPlayerList)
+        if (aCount == 0 or hCount == 0) and not playerTracker.initialCaptureRetried then
+            print("  ⚠️ Epic BG initial capture missing a faction (A=" .. aCount .. ", H=" .. hCount .. ") - forcing one more refresh")
+            playerTracker.initialCaptureRetried = true
+            RequestBattlefieldScoreData()
+            C_Timer.After(1.5, function()
+                if insideBG then
+                    -- Do not clear previous entries; augment with any new visible players
+                    local beforeCount = tCount(playerTracker.initialPlayerList)
+                    local rows2 = GetNumBattlefieldScores()
+                    for i = 1, rows2 do
+                        local ok, s2 = pcall(C_PvP.GetScoreInfo, i)
+                        if ok and s2 and s2.name and s2.name ~= "" then
+                            local pn, rn = s2.name, ""
+                            if s2.name:find("-") then pn, rn = s2.name:match("^(.+)-(.+)$") end
+                            if (not rn or rn == "") and s2.realm then rn = s2.realm end
+                            if (not rn or rn == "") and s2.guid then
+                                local _, _, _, _, _, _, _, rFrom = GetPlayerInfoByGUID(s2.guid)
+                                if rFrom and rFrom ~= "" then rn = rFrom end
+                            end
+                            if not rn or rn == "" then rn = GetRealmName() or "Unknown-Realm" end
+                            rn = rn:gsub("%s+", ""):gsub("'", "")
+                            local key = GetPlayerKey(pn, rn)
+                            if not playerTracker.initialPlayerList[key] then
+                                local factionName = (s2.faction == 1) and "Alliance" or ((s2.faction == 0) and "Horde" or (s2.side == 1 and "Alliance" or (s2.side == 0 and "Horde" or "")))
+                                playerTracker.initialPlayerList[key] = { name = pn, realm = rn, faction = factionName }
+                            end
+                        end
+                    end
+                    local afterCount = tCount(playerTracker.initialPlayerList)
+                    print("  After augmentation: " .. afterCount .. " players (added " .. (afterCount - beforeCount) .. ")")
+                end
+                playerTracker.initialListCaptured = true
+            end)
+            return
+        end
+    end
+
     playerTracker.initialListCaptured = true
     
     -- Show first few players as verification with complete info
@@ -2067,30 +2128,34 @@ local function CollectScoreData(attemptNumber)
     print("Final data has " .. #t .. " players")
     print("Initial list has " .. tCount(playerTracker.initialPlayerList) .. " players")
     
-    -- Create AFKer list: people in initial list but NOT in final data
+    -- Create AFKer list unless we joined in-progress (in which case AFK/backfill analysis isn't valid)
     local afkers = {}
-    for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
-        local foundInFinal = false
-        for _, finalPlayer in ipairs(t) do
-            local finalPlayerKey = GetPlayerKey(finalPlayer.name, finalPlayer.realm)
-            if finalPlayerKey == playerKey then
-                foundInFinal = true
-                break
+    if not playerTracker.joinedInProgress then
+        for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
+            local foundInFinal = false
+            for _, finalPlayer in ipairs(t) do
+                local finalPlayerKey = GetPlayerKey(finalPlayer.name, finalPlayer.realm)
+                if finalPlayerKey == playerKey then
+                    foundInFinal = true
+                    break
+                end
+            end
+            
+            if not foundInFinal then
+                -- Use complete player information from initial capture
+                local afkerData = {
+                    name = playerInfo.name,
+                    realm = playerInfo.realm,
+                    class = playerInfo.class or "Unknown",
+                    spec = playerInfo.spec or "",
+                    faction = playerInfo.faction or "Unknown"
+                }
+                table.insert(afkers, afkerData)
+                print("AFKer: " .. playerKey .. " (" .. afkerData.class .. " " .. afkerData.faction .. " - in initial, not in final)")
             end
         end
-        
-        if not foundInFinal then
-            -- Use complete player information from initial capture
-            local afkerData = {
-                name = playerInfo.name,
-                realm = playerInfo.realm,
-                class = playerInfo.class or "Unknown",
-                spec = playerInfo.spec or "",
-                faction = playerInfo.faction or "Unknown"
-            }
-            table.insert(afkers, afkerData)
-            print("AFKer: " .. playerKey .. " (" .. afkerData.class .. " " .. afkerData.faction .. " - in initial, not in final)")
-        end
+    else
+        print("Joined in-progress: suppressing AFKer detection for this log")
     end
     
     -- Set participation flags for each player in final data
@@ -2098,10 +2163,15 @@ local function CollectScoreData(attemptNumber)
         local playerKey = GetPlayerKey(player.name, player.realm)
         
         if playerTracker.joinedInProgress then
-            -- In-progress join: can't reliably determine backfill status
-            player.isBackfill = false -- Default to false
-            player.participationUnknown = true
-            print("Unknown participation: " .. playerKey .. " (joined mid-match)")
+            -- In-progress join: only uploader (current player) counts as backfill, others unaffected
+            local isCurrent = (player.name == currentPlayerName and player.realm == currentPlayerRealm)
+            player.isBackfill = isCurrent
+            player.participationUnknown = not isCurrent
+            if isCurrent then
+                print("Backfill (self): " .. playerKey .. " (joined mid-match)")
+            else
+                print("Unknown participation: " .. playerKey .. " (joined mid-match)")
+            end
         else
             -- Normal join: use standard logic
             if not playerTracker.initialPlayerList[playerKey] then
@@ -3831,73 +3901,83 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             initialPlayerCount = 0 -- Reset player count tracking
             StartOverflowTracking() -- Start monitoring for overflow
             
-            -- CRITICAL: Check immediately if this is an in-progress BG (with a few retries)
+            -- CRITICAL: Check if this is an in-progress BG with multiple robust retries
             local function CheckInProgress(attempt)
                 attempt = attempt or 1
                 if not insideBG then return end
-                local isInProgressBG = false
-                local detectionMethod = "none"
+                    local isInProgressBG = false
+                    local detectionMethod = "none"
 
-                -- Method 1: Check API duration (most reliable)
-                if C_PvP and C_PvP.GetActiveMatchDuration then
-                    local apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                    if apiDuration > 0 then -- Any positive duration means match already started
-                        isInProgressBG = true
-                        detectionMethod = "API_duration_" .. apiDuration .. "s"
-                        Debug("IN-PROGRESS BG detected via API duration: " .. apiDuration .. " seconds (attempt " .. attempt .. ")")
+                -- Try to force the scoreboard to refresh for more reliable reads
+                RequestBattlefieldScoreData()
+
+                C_Timer.After(0.6, function()
+                    if not insideBG then return end
+                    
+                    -- Method 1: Check API duration (most reliable)
+                    if C_PvP and C_PvP.GetActiveMatchDuration then
+                        local apiDuration = C_PvP.GetActiveMatchDuration() or 0
+                        if apiDuration > 5 then -- Small buffer: >5s indicates the match already started before zoning in
+                            isInProgressBG = true
+                            detectionMethod = "API_duration_" .. apiDuration .. "s"
+                            Debug("IN-PROGRESS BG detected via API duration: " .. apiDuration .. " seconds (attempt " .. attempt .. ")")
+                        end
                     end
-                end
-
-                -- Method 2: Check if both teams are immediately visible (fallback)
-                if not isInProgressBG then
-                    local rows = GetNumBattlefieldScores()
-                    if rows > 0 then
-                        local allianceCount, hordeCount = 0, 0
-                        for i = 1, math.min(rows, 20) do
-                            local success, s = pcall(C_PvP.GetScoreInfo, i)
-                            if success and s and s.name then
-                                if s.faction == 0 then
-                                    hordeCount = hordeCount + 1
-                                elseif s.faction == 1 then
-                                    allianceCount = allianceCount + 1
+                    
+                    -- Method 2: Check if both teams are immediately visible (fallback)
+                    if not isInProgressBG then
+                        local rows = GetNumBattlefieldScores()
+                        if rows > 0 then
+                            local allianceCount, hordeCount = 0, 0
+                            for i = 1, math.min(rows, 30) do
+                                local success, s = pcall(C_PvP.GetScoreInfo, i)
+                                if success and s and s.name then
+                                    if s.faction == 0 then
+                                        hordeCount = hordeCount + 1
+                                    elseif s.faction == 1 then
+                                        allianceCount = allianceCount + 1
+                                    end
                                 end
                             end
-                        end
-                        -- If both teams visible immediately, likely in-progress
-                        if allianceCount > 0 and hordeCount > 0 then
-                            isInProgressBG = true
-                            detectionMethod = "both_teams_visible_immediately"
-                            Debug("IN-PROGRESS BG detected via immediate team visibility (attempt " .. attempt .. ")")
+                            -- If both teams visible immediately, likely in-progress
+                            if allianceCount > 0 and hordeCount > 0 then
+                                isInProgressBG = true
+                                detectionMethod = "both_teams_visible_immediately"
+                                Debug("IN-PROGRESS BG detected via immediate team visibility (attempt " .. attempt .. ")")
+                            end
                         end
                     end
+                    
+                    if isInProgressBG then
+                        print("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
+                        print("Detection method: " .. detectionMethod)
+                        print("Player joined an ongoing match - adjusting tracking behavior")
+                        
+                        -- Set flags to indicate this is an in-progress join
+                        playerTracker.joinedInProgress = true
+                        playerTracker.battleHasBegun = true -- Match has obviously started
+                        
+                        -- Capture current state as "initial" list (best we can do)
+                        print("*** Capturing current player state as baseline (in-progress join) ***")
+                        CaptureInitialPlayerList(true) -- Skip match start validation
+                        
+                        -- Mark the player themselves as a backfill candidate
+                        playerTracker.playerJoinedInProgress = true
+                        return
+                    end
+
+                    -- Retry additional times in case APIs/scoreboard are slow to populate (especially on epic maps)
+                    local epic = IsEpicBattleground()
+                    local maxAttempts = epic and 6 or 4
+                    local delays = epic and { 2, 6, 12, 20, 30, 45 } or { 2, 5, 10, 15 }
+                    if attempt < maxAttempts then
+                        local nextDelay = delays[attempt + 1] or 10
+                        C_Timer.After(nextDelay, function() CheckInProgress(attempt + 1) end)
+                    else
+                        Debug("Normal BG join detected - waiting for match to start")
+                        Debug("Waiting for match to start before capturing initial player list")
                 end
-
-                if isInProgressBG then
-                    print("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
-                    print("Detection method: " .. detectionMethod)
-                    print("Player joined an ongoing match - adjusting tracking behavior")
-
-                    -- Set flags to indicate this is an in-progress join
-                    playerTracker.joinedInProgress = true
-                    playerTracker.battleHasBegun = true -- Match has obviously started
-
-                    -- Capture current state as "initial" list (best we can do)
-                    print("*** Capturing current player state as baseline (in-progress join) ***")
-                    CaptureInitialPlayerList(true) -- Skip match start validation
-
-                    -- Mark the player themselves as a backfill candidate
-                    playerTracker.playerJoinedInProgress = true
-                    return
-                end
-
-                -- Retry a couple more times in case APIs/scoreboard were not ready yet
-                if attempt < 3 then
-                    local delays = { 2, 5, 10 }
-                    C_Timer.After(delays[attempt + 1] or 5, function() CheckInProgress(attempt + 1) end)
-                else
-                    Debug("Normal BG join detected - waiting for match to start")
-                    Debug("Waiting for match to start before capturing initial player list")
-                end
+            end)
             end
             C_Timer.After(2, function() CheckInProgress(1) end)
             
@@ -3925,7 +4005,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             end
             
             -- Start checking after 30 seconds (longer delay for preparation phase)
-            C_Timer.After(30, CheckMatchStart)
+            C_Timer.After(25, CheckMatchStart)
             
         elseif not insideBG and wasInBG then
             -- Just left a BG
@@ -4039,8 +4119,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
 
                 -- Guard against very late captures near the end of a match
                 local timeSinceStart = GetTime() - bgStartTime
-                if timeSinceStart >= 120 then
-                    print("*** SKIPPING initial capture: more than 120s since start ***")
+                if timeSinceStart >= 240 then
+                    print("*** SKIPPING initial capture: more than 240s since start ***")
                     return
                 end
                 
@@ -4057,7 +4137,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         end
                     end
                     
-                    -- Use conservative match start check
+                    -- Use conservative match start check (for epics, relax minimum players requirement via override)
                     local matchHasStarted = IsMatchStarted()
                     print("Conservative match started validation: " .. tostring(matchHasStarted))
                     
@@ -4067,7 +4147,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     if matchHasStarted then
                         print("*** MATCH CONFIRMED STARTED - Calling CaptureInitialPlayerList ***")
                         Debug("MATCH START CONFIRMED via conservative PVP_MATCH_STATE_CHANGED validation")
-                        CaptureInitialPlayerList(false)
+                        -- On epic BGs, allow initial capture with validation bypass once scoreboard shows both factions even if players < threshold
+                        CaptureInitialPlayerList(IsEpicBattleground())
                     else
                         print("*** MATCH NOT YET STARTED - Conservative validation failed ***")
                         print("  - Conservative IsMatchStarted() returned false")
