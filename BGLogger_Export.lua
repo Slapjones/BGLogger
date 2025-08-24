@@ -239,7 +239,6 @@ function ExportBattleground(key)
 		afkers = afkersList,
 		integrity = data.integrity,
 		joinedInProgress = data.joinedInProgress or false,
-		playerJoinedInProgress = data.playerJoinedInProgress or false,
 		validForStats = data.validForStats or false
 	}
 

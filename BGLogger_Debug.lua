@@ -68,7 +68,7 @@ end
 ---------------------------------------------------------------------
 
 -- Predefined golden vectors. Expected hashes can be filled after running
--- /bgdebug goldens once. Keep these in sync with HASH_SPEC.md and the website.
+-- /bgdebug goldens once. Keep these in sync with the website reference (utils/hash.js).
 local GOLDEN_VECTORS = {
     {
         name = "Vector 1 - Simple ASCII",
@@ -124,7 +124,7 @@ function BGLoggerDebug.RunGoldenHashTests()
             print("   expected: " .. tostring(vec.expected))
             print("   match: " .. tostring(vec.expected == computed))
         else
-            print("   expected: <not set> (update HASH_SPEC.md and GOLDEN_VECTORS after first run)")
+            print("   expected: <not set> (update project docs and GOLDEN_VECTORS after first run)")
         end
     end
     print("=== End Golden Tests ===")

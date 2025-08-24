@@ -1984,6 +1984,8 @@ local function CollectScoreData(attemptNumber)
     -- Debug: Track current player
     local currentPlayerName = UnitName("player")
     local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
+    -- Normalize current player's realm the same way as scoreboard entries
+    currentPlayerRealm = currentPlayerRealm:gsub("%s+", ""):gsub("'", "")
     print("*** CollectScoreData: Looking for current player ***")
     print("Current player: " .. currentPlayerName .. "-" .. currentPlayerRealm)
     local foundCurrentPlayer = false

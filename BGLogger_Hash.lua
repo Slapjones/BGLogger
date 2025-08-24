@@ -1,7 +1,7 @@
 ---------------------------------------------------------------------
 -- BGLogger Hash Module (simple_v1)
 -- Contains ONLY hash-related code moved from BGLogger.lua
--- NOTE: Do not change logic without updating website and HASH_SPEC.md
+-- NOTE: Do not change logic without updating website and the reference in backend/utils/hash.js
 ---------------------------------------------------------------------
 
 -- Safe debug logger (avoids dependency on Debug local in main file)
