@@ -3907,6 +3907,11 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             local function CheckInProgress(attempt)
                 attempt = attempt or 1
                 if not insideBG then return end
+                -- Do not run in-progress detection once the match has started or the initial list is captured
+                if (playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured)) then
+                    Debug("CheckInProgress aborted: match started or initial list captured (attempt " .. tostring(attempt) .. ")")
+                    return
+                end
                     local isInProgressBG = false
                     local detectionMethod = "none"
 
@@ -3915,6 +3920,11 @@ Driver:SetScript("OnEvent", function(_, e, ...)
 
                 C_Timer.After(0.6, function()
                     if not insideBG then return end
+                    -- Re-check in case match started or initial list captured while waiting
+                    if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
+                        Debug("CheckInProgress inner aborted: match started or initial list captured")
+                        return
+                    end
                     
                     -- Method 1: Check API duration (most reliable)
                     if C_PvP and C_PvP.GetActiveMatchDuration then
@@ -3974,14 +3984,27 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     local delays = epic and { 2, 6, 12, 20, 30, 45 } or { 2, 5, 10, 15 }
                     if attempt < maxAttempts then
                         local nextDelay = delays[attempt + 1] or 10
-                        C_Timer.After(nextDelay, function() CheckInProgress(attempt + 1) end)
+                        C_Timer.After(nextDelay, function() 
+                            -- Skip retries if battle has begun or initial list was captured in the meantime
+                            if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
+                                Debug("CheckInProgress retries cancelled: match started or initial list captured")
+                                return
+                            end
+                            CheckInProgress(attempt + 1) 
+                        end)
                     else
                         Debug("Normal BG join detected - waiting for match to start")
                         Debug("Waiting for match to start before capturing initial player list")
                 end
             end)
             end
-            C_Timer.After(2, function() CheckInProgress(1) end)
+            C_Timer.After(2, function() 
+                if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
+                    Debug("Initial CheckInProgress skipped: match already started or initial list captured")
+                    return
+                end
+                CheckInProgress(1) 
+            end)
             
             -- Fallback: Set battleHasBegun flag after reasonable delay if no chat message comes
             C_Timer.After(90, function() -- 1.5 minutes after entering BG
