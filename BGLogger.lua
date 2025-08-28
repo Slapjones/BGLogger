@@ -2909,6 +2909,7 @@ function ShowList()
     WINDOW.detailScroll:Hide()
     WINDOW.backBtn:Hide()
     WINDOW.listScroll:Show()
+    if WINDOW.exportBtn then WINDOW.exportBtn:Hide() end
     
     -- Clear existing buttons first
     for _, btn in ipairs(ListButtons) do
@@ -3018,6 +3019,7 @@ function ShowDetail(key)
     WINDOW.listScroll:Hide()
     WINDOW.detailScroll:Show()
     WINDOW.backBtn:Show()
+    if WINDOW.exportBtn then WINDOW.exportBtn:Show() end
     
     -- Clear existing detail lines completely
     for i = 1, #DetailLines do
@@ -3424,13 +3426,13 @@ local function CreateWindow()
     exportBtn:SetText("Export")
     exportBtn:SetScript("OnClick", function()
         if WINDOW.currentView == "detail" and WINDOW.currentKey then
-            -- Export the currently viewed battleground
             ExportBattleground(WINDOW.currentKey)
         else
-            -- Show export options menu
-            ShowExportMenu()
+            -- No action in list view
         end
     end)
+    exportBtn:Hide() -- Hidden by default (list view)
+    f.exportBtn = exportBtn
     
     -- Create list scroll frame
     local listScroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
