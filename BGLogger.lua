@@ -793,12 +793,12 @@ local function IsMatchStarted()
     local timeSinceEntered = GetTime() - bgStartTime
     local minimumWaitTime = IsEpicBattleground() and 20 or 45 -- Shorter for epics; enemy team is far but duration confirms start
     
-    print("Match start requirements check:")
-    print("  Battle begun message: " .. tostring(playerTracker.battleHasBegun))
-    print("  API duration: " .. apiDuration .. " seconds")
-    print("  Both factions visible: " .. tostring(bothFactionsVisible) .. " (A=" .. allianceCount .. ", H=" .. hordeCount .. ")")
-    print("  Minimum players: " .. tostring(hasMinimumPlayers) .. " (" .. rows .. " total)")
-    print("  Time since entered: " .. math.floor(timeSinceEntered) .. "s (min: " .. minimumWaitTime .. "s)")
+    Debug("Match start requirements check:")
+    Debug("  Battle begun message: " .. tostring(playerTracker.battleHasBegun))
+    Debug("  API duration: " .. apiDuration .. " seconds")
+    Debug("  Both factions visible: " .. tostring(bothFactionsVisible) .. " (A=" .. allianceCount .. ", H=" .. hordeCount .. ")")
+    Debug("  Minimum players: " .. tostring(hasMinimumPlayers) .. " (" .. rows .. " total)")
+    Debug("  Time since entered: " .. math.floor(timeSinceEntered) .. "s (min: " .. minimumWaitTime .. "s)")
     
     -- ALL requirements must be met
     local matchStarted = playerTracker.battleHasBegun and 
@@ -863,58 +863,58 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     for i = 1, rows do
         local success, s = pcall(C_PvP.GetScoreInfo, i)
         if success and s then
-            print("Processing player " .. i .. ": " .. tostring(s.name or "NO_NAME"))
+            Debug("Processing player " .. i .. ": " .. tostring(s.name or "NO_NAME"))
             
             -- Check for incomplete data (common in AV with distant players)
             if not s.name or s.name == "" then
-                print("  ⚠️ SKIPPED: Player has no name (distant player in AV?)")
+                Debug("  SKIPPED: Player has no name (distant player in AV?)")
                 skippedCount = skippedCount + 1
             else
                 local playerName, realmName = s.name, ""
             
             if s.name:find("-") then
                 playerName, realmName = s.name:match("^(.+)-(.+)$")
-                print("  Split name: '" .. playerName .. "' realm: '" .. realmName .. "'")
+                Debug("  Split name: '" .. playerName .. "' realm: '" .. realmName .. "'")
             else
-                print("  No realm in name, using fallback methods")
+                Debug("  No realm in name, using fallback methods")
             end
             
             if (not realmName or realmName == "") and s.realm then
                 realmName = s.realm
-                print("  Using s.realm: '" .. realmName .. "'")
+                Debug("  Using s.realm: '" .. realmName .. "'")
             end
             
             if (not realmName or realmName == "") and s.guid then
                 local _, _, _, _, _, _, _, realmFromGUID = GetPlayerInfoByGUID(s.guid)
                 if realmFromGUID and realmFromGUID ~= "" then
                     realmName = realmFromGUID
-                    print("  Using GUID realm: '" .. realmName .. "'")
+                    Debug("  Using GUID realm: '" .. realmName .. "'")
                 end
             end
             
             if not realmName or realmName == "" then
                 realmName = playerRealm
-                print("  Using fallback playerRealm: '" .. realmName .. "'")
+                Debug("  Using fallback playerRealm: '" .. realmName .. "'")
             end
             
             -- CRITICAL: Normalize realm name exactly like CollectScoreData does
             realmName = realmName:gsub("%s+", ""):gsub("'", "")
-            print("  Normalized realm: '" .. realmName .. "'")
+            Debug("  Normalized realm: '" .. realmName .. "'")
             
             local playerKey = GetPlayerKey(playerName, realmName)
-            print("  Generated key: '" .. playerKey .. "'")
+            Debug("  Generated key: '" .. playerKey .. "'")
             
             -- Check for key collisions (happens with empty names in AV)
             if playerTracker.initialPlayerList[playerKey] then
-                print("  ⚠️ KEY COLLISION: Key '" .. playerKey .. "' already exists!")
-                print("    Existing: " .. (playerTracker.initialPlayerList[playerKey].name or "nil"))
-                print("    New: " .. (playerName or "nil"))
+                Debug("  KEY COLLISION: Key '" .. playerKey .. "' already exists!")
+                Debug("    Existing: " .. (playerTracker.initialPlayerList[playerKey].name or "nil"))
+                Debug("    New: " .. (playerName or "nil"))
                 keyCollisions[playerKey] = (keyCollisions[playerKey] or 0) + 1
                 
                 -- Generate unique key for collision
                 local uniqueKey = playerKey .. "_" .. i
                 playerKey = uniqueKey
-                print("    Using unique key: '" .. playerKey .. "'")
+                Debug("    Using unique key: '" .. playerKey .. "'")
             end
             
             -- Enhanced class detection (same logic as CollectScoreData)
@@ -965,33 +965,33 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 rawSide = s.side,
                 rawRace = s.race
             }
-            print("  ✓ Added to initial list: " .. className .. " " .. factionName)
+            Debug("  Added to initial list: " .. className .. " " .. factionName)
             processedCount = processedCount + 1
             
             -- Special check for current player
             if playerName == UnitName("player") then
-                print("  *** THIS IS THE CURRENT PLAYER ***")
+                Debug("  THIS IS THE CURRENT PLAYER")
             end
             end
         else
-            print("Failed to get score info for player " .. i)
+            Debug("Failed to get score info for player " .. i)
             skippedCount = skippedCount + 1
         end
     end
     
     local initialCount = tCount(playerTracker.initialPlayerList)
     
-    print("*** Initial capture COMPLETE ***")
-    print("  Total API entries: " .. rows)
-    print("  Successfully processed: " .. processedCount)
-    print("  Skipped (no name): " .. skippedCount)
-    print("  Final stored players: " .. initialCount)
+    Debug("*** Initial capture COMPLETE ***")
+    Debug("  Total API entries: " .. rows)
+    Debug("  Successfully processed: " .. processedCount)
+    Debug("  Skipped (no name): " .. skippedCount)
+    Debug("  Final stored players: " .. initialCount)
     
     -- Show key collision information
     if next(keyCollisions) then
-        print("  ⚠️ Key collisions detected:")
+        Debug("  Key collisions detected:")
         for key, count in pairs(keyCollisions) do
-            print("    '" .. key .. "': " .. count .. " collisions")
+            Debug("    '" .. key .. "': " .. count .. " collisions")
         end
     end
     
@@ -1068,7 +1068,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     if IsEpicBattleground() then
         local aCount, hCount = CountFactionsInTable(playerTracker.initialPlayerList)
         if (aCount == 0 or hCount == 0) and not playerTracker.initialCaptureRetried then
-            print("  ⚠️ Epic BG initial capture missing a faction (A=" .. aCount .. ", H=" .. hCount .. ") - forcing one more refresh")
+            Debug("  Epic BG initial capture missing a faction (A=" .. aCount .. ", H=" .. hCount .. ") - forcing one more refresh")
             playerTracker.initialCaptureRetried = true
             RequestBattlefieldScoreData()
             C_Timer.After(1.5, function()
@@ -4112,7 +4112,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         local actualMatchState = matchState
         if not actualMatchState and C_PvP and C_PvP.GetActiveMatchState then
             actualMatchState = C_PvP.GetActiveMatchState()
-            print("Got match state from API: '" .. tostring(actualMatchState) .. "'")
+            Debug("Got match state from API: '" .. tostring(actualMatchState) .. "'")
         end
         
         -- If this update indicates the match is ending/ended, prioritize save and exit
@@ -4133,17 +4133,17 @@ Driver:SetScript("OnEvent", function(_, e, ...)
 
         -- Only attempt initial capture during the early phase of a match
         if not playerTracker.initialListCaptured then
-            print("*** PVP_MATCH_STATE_CHANGED detected, checking if match has truly started ***")
+            Debug("*** PVP_MATCH_STATE_CHANGED detected, checking if match has truly started ***")
             
             C_Timer.After(8, function()
-                print("*** PVP_MATCH_STATE_CHANGED timer callback - checking match status ***")
-                print("Current insideBG: " .. tostring(insideBG))
-                print("Current initialListCaptured: " .. tostring(playerTracker.initialListCaptured))
+                Debug("*** PVP_MATCH_STATE_CHANGED timer callback - checking match status ***")
+                Debug("Current insideBG: " .. tostring(insideBG))
+                Debug("Current initialListCaptured: " .. tostring(playerTracker.initialListCaptured))
 
                 -- Guard against very late captures near the end of a match
                 local timeSinceStart = GetTime() - bgStartTime
                 if timeSinceStart >= 240 then
-                    print("*** SKIPPING initial capture: more than 240s since start ***")
+                    Debug("*** SKIPPING initial capture: more than 240s since start ***")
                     return
                 end
                 
@@ -4152,9 +4152,9 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     local apiDuration = 0
                     if C_PvP and C_PvP.GetActiveMatchDuration then
                         apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                        print("API match duration: " .. apiDuration .. " seconds")
+                        Debug("API match duration: " .. apiDuration .. " seconds")
                         if apiDuration > 0 then
-                            print("*** BATTLE HAS BEGUN detected via API duration: " .. apiDuration .. "s ***")
+                            Debug("*** BATTLE HAS BEGUN detected via API duration: " .. apiDuration .. "s ***")
                             playerTracker.battleHasBegun = true
                             Debug("Battle begun flag set via API detection")
                         end
@@ -4162,28 +4162,28 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     
                     -- Use conservative match start check (for epics, relax minimum players requirement via override)
                     local matchHasStarted = IsMatchStarted()
-                    print("Conservative match started validation: " .. tostring(matchHasStarted))
+                    Debug("Conservative match started validation: " .. tostring(matchHasStarted))
                     
                     local numPlayers = GetNumBattlefieldScores()
-                    print("Current player count: " .. numPlayers)
+                    Debug("Current player count: " .. numPlayers)
                     
                     if matchHasStarted then
-                        print("*** MATCH CONFIRMED STARTED - Calling CaptureInitialPlayerList ***")
+                        Debug("*** MATCH CONFIRMED STARTED - Calling CaptureInitialPlayerList ***")
                         Debug("MATCH START CONFIRMED via conservative PVP_MATCH_STATE_CHANGED validation")
                         -- On epic BGs, allow initial capture with validation bypass once scoreboard shows both factions even if players < threshold
                         CaptureInitialPlayerList(IsEpicBattleground())
                     else
-                        print("*** MATCH NOT YET STARTED - Conservative validation failed ***")
-                        print("  - Conservative IsMatchStarted() returned false")
+                        Debug("*** MATCH NOT YET STARTED - Conservative validation failed ***")
+                        Debug("  - Conservative IsMatchStarted() returned false")
                     end
                 else
-                    print("*** CONDITIONS NOT MET ***")
-                    if not insideBG then print("  - Not in BG anymore") end
-                    if playerTracker.initialListCaptured then print("  - Initial list already captured") end
+                    Debug("*** CONDITIONS NOT MET ***")
+                    if not insideBG then Debug("  - Not in BG anymore") end
+                    if playerTracker.initialListCaptured then Debug("  - Initial list already captured") end
                 end
             end)
         else
-            print("*** Initial list already captured, ignoring this PVP_MATCH_STATE_CHANGED event ***")
+            Debug("*** Initial list already captured, ignoring this PVP_MATCH_STATE_CHANGED event ***")
         end
 
 
