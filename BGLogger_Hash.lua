@@ -113,3 +113,95 @@ function ExtractBattlegroundMetadata(data)
 end
 
 
+---------------------------------------------------------------------
+-- Deep hash v2: canonicalize the ENTIRE export payload (minus integrity)
+-- This must exactly match backend/utils/hash.js V2 implementation
+---------------------------------------------------------------------
+
+-- Normalize string bytes (non-ASCII -> '_') to match web implementation
+local function NormalizeStringBytes(str)
+    if str == nil then return "" end
+    str = tostring(str)
+    local out = {}
+    for i = 1, #str do
+        local byte = string.byte(str, i)
+        if byte and byte <= 127 then
+            out[#out+1] = string.char(byte)
+        else
+            out[#out+1] = "_"
+        end
+    end
+    return table.concat(out)
+end
+
+-- Determine if a Lua table should be treated as an array (1..n sequence)
+local function IsArrayTable(t)
+    if type(t) ~= "table" then return false end
+    local maxIndex = 0
+    for k, _ in pairs(t) do
+        if type(k) ~= "number" then
+            return false
+        end
+        if k > maxIndex then maxIndex = k end
+    end
+    return maxIndex > 0
+end
+
+-- Canonicalize any Lua value into a deterministic string
+local function CanonicalizeValueV2(value)
+    local vt = type(value)
+    if value == nil then
+        return "Z|"
+    elseif vt == "string" then
+        return "S|" .. NormalizeStringBytes(value)
+    elseif vt == "number" then
+        local n = value
+        if n ~= n or n == math.huge or n == -math.huge then n = 0 end
+        return "N|" .. tostring(n)
+    elseif vt == "boolean" then
+        return "B|" .. (value and "1" or "0")
+    elseif vt == "table" then
+        if IsArrayTable(value) then
+            local elems = {}
+            -- Serialize present indices 1..max, ignoring gaps, then sort for order-insensitivity
+            local maxIndex = 0
+            for k in pairs(value) do if type(k) == "number" and k > maxIndex then maxIndex = k end end
+            for i = 1, maxIndex do
+                if value[i] ~= nil then
+                    elems[#elems+1] = CanonicalizeValueV2(value[i])
+                end
+            end
+            table.sort(elems)
+            return "A|" .. table.concat(elems, "|")
+        else
+            -- Object: sort keys lexicographically, exclude 'integrity' anywhere in the tree
+            local keys = {}
+            for k in pairs(value) do
+                if tostring(k) ~= "integrity" then
+                    keys[#keys+1] = tostring(k)
+                end
+            end
+            table.sort(keys)
+            local parts = {}
+            for _, k in ipairs(keys) do
+                local v = value[k]
+                parts[#parts+1] = "K|" .. NormalizeStringBytes(k) .. "|" .. CanonicalizeValueV2(v)
+            end
+            return "O|" .. table.concat(parts, "|")
+        end
+    else
+        return "Z|"
+    end
+end
+
+-- Public: compute v2 hash from an export-like Lua table (without integrity)
+function GenerateDataHashV2FromExport(exportObject)
+    local dataString = CanonicalizeValueV2(exportObject)
+    local hash = SimpleStringHash(dataString)
+    local metadata = { algorithm = "deep_v2" }
+    return hash, metadata
+end
+
+-- (Removed debug helper prior to release)
+
+
