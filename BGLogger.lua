@@ -807,7 +807,7 @@ local function IsMatchStarted()
                         hasMinimumPlayers and
                         timeSinceEntered >= minimumWaitTime
     
-    print("  FINAL RESULT: " .. tostring(matchStarted))
+    Debug("  FINAL RESULT: " .. tostring(matchStarted))
     
     return matchStarted
 end
@@ -1006,17 +1006,17 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     local mapName = (mapInfo and mapInfo.name) or "Unknown"
     
     if isEpicMap then
-        print("  📍 EPIC BG DETECTED - Distance-based data limitations expected (" .. mapName .. ")")
+        Debug("  EPIC BG DETECTED - Distance-based data limitations expected (" .. mapName .. ")")
         if skippedCount > 10 then
-            print("    High skip count (" .. skippedCount .. ") is common due to player distance across the large map")
+            Debug("    High skip count (" .. skippedCount .. ") is common due to player distance across the large map")
         end
     end
     
     -- Smart retry logic for large disparities
     if isLargeDisparity and not playerTracker.initialCaptureRetried then
-        print("  🔄 LARGE DISPARITY DETECTED (" .. math.floor(completenessRatio * 100) .. "% success rate)")
+        Debug("  LARGE DISPARITY DETECTED (" .. math.floor(completenessRatio * 100) .. "% success rate)")
         local retryDelay = isEpicMap and 25 or 12
-        print("    Scheduling retry in " .. retryDelay .. " seconds to allow players to move closer (epic=" .. tostring(isEpicMap) .. ")...")
+        Debug("    Scheduling retry in " .. retryDelay .. " seconds to allow players to move closer (epic=" .. tostring(isEpicMap) .. ")...")
         
         -- Store first attempt stats for comparison
         playerTracker.firstAttemptStats = {
@@ -1035,14 +1035,14 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 RequestBattlefieldScoreData()
                 C_Timer.After(1.0, function()
             if insideBG and not playerTracker.initialListCaptured then
-                print("🔄 *** RETRYING INITIAL CAPTURE (players should be closer now) ***")
+                Debug("RETRYING INITIAL CAPTURE (players should be closer now)")
                 CaptureInitialPlayerList(true)  -- Skip match start check since we know it's started
                     else
-                        print("🔄 Retry cancelled after refresh - no longer in BG or already captured")
+                        Debug("Retry cancelled after refresh - no longer in BG or already captured")
                     end
                 end)
             else
-                print("🔄 Retry cancelled - no longer in BG or already captured")
+                Debug("Retry cancelled - no longer in BG or already captured")
             end
         end)
         
@@ -1056,10 +1056,10 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         local newCompleteness = math.floor((processedCount / rows) * 100)
         local oldCompleteness = math.floor((firstAttempt.processed / firstAttempt.rows) * 100)
         
-        print("  📈 RETRY IMPROVEMENT:")
-        print("    First attempt: " .. firstAttempt.stored .. " players (" .. oldCompleteness .. "% success)")
-        print("    After retry: " .. initialCount .. " players (" .. newCompleteness .. "% success)")
-        print("    Improvement: +" .. improvement .. " players")
+        Debug("  RETRY IMPROVEMENT:")
+        Debug("    First attempt: " .. firstAttempt.stored .. " players (" .. oldCompleteness .. "% success)")
+        Debug("    After retry: " .. initialCount .. " players (" .. newCompleteness .. "% success)")
+        Debug("    Improvement: +" .. improvement .. " players")
         
         playerTracker.firstAttemptStats = nil  -- Clear stats
     end
@@ -1096,7 +1096,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                         end
                     end
                     local afterCount = tCount(playerTracker.initialPlayerList)
-                    print("  After augmentation: " .. afterCount .. " players (added " .. (afterCount - beforeCount) .. ")")
+                    Debug("  After augmentation: " .. afterCount .. " players (added " .. (afterCount - beforeCount) .. ")")
                 end
                 playerTracker.initialListCaptured = true
             end)
@@ -1110,7 +1110,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     local count = 0
     for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
         if count < 3 then
-            print("  Sample: " .. playerKey .. " (" .. (playerInfo.class or "Unknown") .. " " .. (playerInfo.faction or "Unknown") .. ")")
+            Debug("  Sample: " .. playerKey .. " (" .. (playerInfo.class or "Unknown") .. " " .. (playerInfo.faction or "Unknown") .. ")")
             count = count + 1
         end
     end
@@ -1118,37 +1118,37 @@ end
 
 -- Capture final player list (call this when saving match data)
 local function CaptureFinalPlayerList(playerStats)
-    print("*** CaptureFinalPlayerList called ***")
-    print("Player stats provided: " .. #playerStats)
+    Debug("*** CaptureFinalPlayerList called ***")
+    Debug("Player stats provided: " .. #playerStats)
     
     -- Critical debug: Check if current player is in the provided data
     local currentPlayerName = UnitName("player")
     local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
     local currentPlayerKey = GetPlayerKey(currentPlayerName, currentPlayerRealm)
     
-    print("*** SEARCHING FOR CURRENT PLAYER ***")
-    print("Current player name: '" .. currentPlayerName .. "'")
-    print("Current player realm: '" .. currentPlayerRealm .. "'")
-    print("Current player key: '" .. currentPlayerKey .. "'")
+    Debug("*** SEARCHING FOR CURRENT PLAYER ***")
+    Debug("Current player name: '" .. currentPlayerName .. "'")
+    Debug("Current player realm: '" .. currentPlayerRealm .. "'")
+    Debug("Current player key: '" .. currentPlayerKey .. "'")
     
     local foundCurrentPlayer = false
     
     playerTracker.finalPlayerList = {}
     
     for i, player in ipairs(playerStats) do
-        print("Processing final player " .. i .. ": " .. player.name .. "-" .. player.realm)
+        Debug("Processing final player " .. i .. ": " .. player.name .. "-" .. player.realm)
         
         local playerKey = GetPlayerKey(player.name, player.realm)
-        print("  Generated key: '" .. playerKey .. "'")
+        Debug("  Generated key: '" .. playerKey .. "'")
         
         -- Check if this matches current player
         if player.name == currentPlayerName then
-            print("  *** NAME MATCH - THIS IS THE CURRENT PLAYER ***")
+            Debug("  NAME MATCH - current player")
             foundCurrentPlayer = true
         end
         
         if playerKey == currentPlayerKey then
-            print("  *** KEY MATCH - THIS IS THE CURRENT PLAYER ***")
+            Debug("  KEY MATCH - current player")
             foundCurrentPlayer = true
         end
         
@@ -1157,29 +1157,25 @@ local function CaptureFinalPlayerList(playerStats)
             realm = player.realm,
             playerData = player -- Keep reference to full player data
         }
-        print("  ✓ Added to final list")
+        Debug("  Added to final list")
     end
     
-    print("*** CURRENT PLAYER SEARCH RESULT ***")
-    print("Found current player in final data: " .. tostring(foundCurrentPlayer))
+    Debug("*** CURRENT PLAYER SEARCH RESULT ***")
+    Debug("Found current player in final data: " .. tostring(foundCurrentPlayer))
     
     if not foundCurrentPlayer then
-        print("*** ERROR: Current player NOT found in final player data! ***")
-        print("This will cause incorrect AFKer detection!")
-        print("Possible causes:")
-        print("  1. CollectScoreData() is not including current player")
-        print("  2. Name/realm mismatch between initial and final capture")
-        print("  3. Player left BG before final capture (but you're still here)")
+        Debug("*** ERROR: Current player NOT found in final player data! ***")
+        Debug("This may trigger AFKer detection due to missing current player")
     end
     
     local finalCount = tCount(playerTracker.finalPlayerList)
-    print("*** Final capture COMPLETE: " .. finalCount .. " players stored ***")
+    Debug("*** Final capture COMPLETE: " .. finalCount .. " players stored ***")
     
     -- Show first few players as verification
     local count = 0
     for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
         if count < 3 then
-            print("  Sample: " .. playerKey)
+            Debug("  Sample: " .. playerKey)
             count = count + 1
         end
     end
@@ -1187,7 +1183,7 @@ end
 
 -- Simple comparison to determine AFKers and Backfills
 local function AnalyzePlayerLists()
-    print("*** AnalyzePlayerLists called ***")
+    Debug("*** AnalyzePlayerLists called ***")
     
     local afkers = {}
     local backfills = {}
@@ -1196,29 +1192,29 @@ local function AnalyzePlayerLists()
     local initialCount = tCount(playerTracker.initialPlayerList)
     local finalCount = tCount(playerTracker.finalPlayerList)
     
-    print("Initial list size: " .. initialCount)
-    print("Final list size: " .. finalCount)
-    print("Joined in progress: " .. tostring(playerTracker.joinedInProgress or false))
+    Debug("Initial list size: " .. initialCount)
+    Debug("Final list size: " .. finalCount)
+    Debug("Joined in progress: " .. tostring(playerTracker.joinedInProgress or false))
     
     if initialCount == 0 then
         if playerTracker.joinedInProgress then
-            print("*** INFO: Initial list is EMPTY because player joined in-progress BG ***")
-            print("*** All players will be marked as 'unknown' participation status ***")
+            Debug("INFO: Initial list is EMPTY because player joined in-progress BG")
+            Debug("All players will be marked as 'unknown' participation status")
         else
-            print("*** WARNING: Initial list is EMPTY! Everyone will be marked as backfill! ***")
+            Debug("WARNING: Initial list is EMPTY! Everyone will be marked as backfill!")
         end
     end
     
     if finalCount == 0 then
-        print("*** WARNING: Final list is EMPTY! This shouldn't happen! ***")
+        Debug("WARNING: Final list is EMPTY! This shouldn't happen!")
         return afkers, backfills, normal
     end
     
     -- Handle in-progress BG joins differently
     if playerTracker.joinedInProgress then
-        print("*** IN-PROGRESS BG ANALYSIS ***")
-        print("Rule: Cannot reliably determine AFKers/Backfills - player joined mid-match")
-        print("All players will be marked as 'unknown' participation status")
+        Debug("IN-PROGRESS BG ANALYSIS")
+        Debug("Rule: Cannot reliably determine AFKers/Backfills - player joined mid-match")
+        Debug("All players will be marked as 'unknown' participation status")
         
         -- Everyone on final scoreboard is treated as normal (can't determine backfill status)
         for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
@@ -1226,47 +1222,47 @@ local function AnalyzePlayerLists()
             -- Mark as unknown participation since we joined mid-match
             playerData.participationUnknown = true
             table.insert(normal, playerData)
-            print("  Unknown participation: " .. playerKey .. " (joined mid-match)")
+            Debug("  Unknown participation: " .. playerKey .. " (joined mid-match)")
         end
         
-        print("*** IN-PROGRESS ANALYSIS COMPLETE ***")
-        print("Normal/Unknown players: " .. #normal)
-        print("Backfills: 0 (cannot determine)")
-        print("AFKers: 0 (cannot determine)")
+        Debug("IN-PROGRESS ANALYSIS COMPLETE")
+        Debug("Normal/Unknown players: " .. #normal)
+        Debug("Backfills: 0 (cannot determine)")
+        Debug("AFKers: 0 (cannot determine)")
         
     else
-        print("*** STANDARD ANALYSIS ***")
-        print("Rule 1: Anyone on final scoreboard = NOT an AFKer (they're still here)")
-        print("Rule 2: Anyone on initial list = NOT a backfill (they were here from start)")
+        Debug("STANDARD ANALYSIS")
+        Debug("Rule 1: Anyone on final scoreboard = NOT an AFKer (they're still here)")
+        Debug("Rule 2: Anyone on initial list = NOT a backfill (they were here from start)")
         
-        print("Step 1: Finding AFKers (in initial but NOT on final scoreboard)")
+        Debug("Step 1: Finding AFKers (in initial but NOT on final scoreboard)")
         for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
             if not playerTracker.finalPlayerList[playerKey] then
                 table.insert(afkers, playerInfo)
-                print("  AFKer: " .. playerKey .. " (was in initial, not on final scoreboard)")
+                Debug("  AFKer: " .. playerKey .. " (was in initial, not on final scoreboard)")
             end
         end
-        print("Found " .. #afkers .. " AFKers")
+        Debug("Found " .. #afkers .. " AFKers")
         
-        print("Step 2: Processing final scoreboard - everyone here is NOT an AFKer")
+        Debug("Step 2: Processing final scoreboard - everyone here is NOT an AFKer")
         for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
             local playerData = playerInfo.playerData
             
             if playerTracker.initialPlayerList[playerKey] then
                 -- Was in initial list = normal player (not backfill, not AFKer)
                 table.insert(normal, playerData)
-                print("  Normal: " .. playerKey .. " (in initial list, on final scoreboard)")
+                Debug("  Normal: " .. playerKey .. " (in initial list, on final scoreboard)")
             else
                 -- Was NOT in initial list = backfill (not AFKer since they're on final scoreboard)
                 table.insert(backfills, playerData)
-                print("  Backfill: " .. playerKey .. " (NOT in initial list, on final scoreboard)")
+                Debug("  Backfill: " .. playerKey .. " (NOT in initial list, on final scoreboard)")
             end
         end
         
-        print("*** STANDARD ANALYSIS COMPLETE ***")
-        print("Normal players: " .. #normal .. " (in initial, on final)")
-        print("Backfills: " .. #backfills .. " (NOT in initial, on final)")
-        print("AFKers: " .. #afkers .. " (in initial, NOT on final)")
+        Debug("STANDARD ANALYSIS COMPLETE")
+        Debug("Normal players: " .. #normal .. " (in initial, on final)")
+        Debug("Backfills: " .. #backfills .. " (NOT in initial, on final)")
+        Debug("AFKers: " .. #afkers .. " (in initial, NOT on final)")
     end
     
     -- Special check for current player
@@ -1274,11 +1270,11 @@ local function AnalyzePlayerLists()
     local playerRealm = GetRealmName() or "Unknown-Realm"
     local yourKey = GetPlayerKey(playerName, playerRealm)
     
-    print("*** YOUR STATUS CHECK ***")
-    print("Your key: " .. yourKey)
-    print("In initial: " .. (playerTracker.initialPlayerList[yourKey] and "YES" or "NO"))
-    print("In final: " .. (playerTracker.finalPlayerList[yourKey] and "YES" or "NO"))
-    print("Joined in progress: " .. tostring(playerTracker.playerJoinedInProgress or false))
+    Debug("YOUR STATUS CHECK")
+    Debug("Your key: " .. yourKey)
+    Debug("In initial: " .. (playerTracker.initialPlayerList[yourKey] and "YES" or "NO"))
+    Debug("In final: " .. (playerTracker.finalPlayerList[yourKey] and "YES" or "NO"))
+    Debug("Joined in progress: " .. tostring(playerTracker.playerJoinedInProgress or false))
     
     -- Determine your status using the appropriate rules
     local yourStatus = "UNKNOWN"
@@ -1300,7 +1296,7 @@ local function AnalyzePlayerLists()
         end
     end
     
-    print("Your status: " .. yourStatus)
+    Debug("Your status: " .. yourStatus)
     
     return afkers, backfills, normal
 end
@@ -1986,8 +1982,8 @@ local function CollectScoreData(attemptNumber)
     local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
     -- Normalize current player's realm the same way as scoreboard entries
     currentPlayerRealm = currentPlayerRealm:gsub("%s+", ""):gsub("'", "")
-    print("*** CollectScoreData: Looking for current player ***")
-    print("Current player: " .. currentPlayerName .. "-" .. currentPlayerRealm)
+    Debug("*** CollectScoreData: Looking for current player ***")
+    Debug("Current player: " .. currentPlayerName .. "-" .. currentPlayerRealm)
     local foundCurrentPlayer = false
     
     local playerRealm = GetBestRealmName()
@@ -2063,9 +2059,9 @@ local function CollectScoreData(attemptNumber)
             
             -- Debug: Check if this is current player
             if playerName == currentPlayerName then
-                print("*** FOUND CURRENT PLAYER in CollectScoreData ***")
-                print("  Name: " .. playerName .. " (matches: " .. currentPlayerName .. ")")
-                print("  Realm: " .. realmName .. " (current: " .. currentPlayerRealm .. ")")
+                Debug("*** FOUND CURRENT PLAYER in CollectScoreData ***")
+                Debug("  Name: " .. playerName .. " (matches: " .. currentPlayerName .. ")")
+                Debug("  Realm: " .. realmName .. " (current: " .. currentPlayerRealm .. ")")
                 foundCurrentPlayer = true
             end
             
@@ -2118,17 +2114,17 @@ local function CollectScoreData(attemptNumber)
     
     Debug("CollectScoreData completed: " .. successfulReads .. " successful, " .. failedReads .. " failed")
     
-    print("*** CollectScoreData RESULT ***")
-    print("Found current player: " .. tostring(foundCurrentPlayer))
+    Debug("*** CollectScoreData RESULT ***")
+    Debug("Found current player: " .. tostring(foundCurrentPlayer))
     if not foundCurrentPlayer then
-        print("*** ERROR: Current player NOT found in scoreboard data! ***")
-        print("This will cause AFKer detection!")
+        Debug("*** ERROR: Current player NOT found in scoreboard data! ***")
+        Debug("This will cause AFKer detection!")
     end
     
     -- Simple AFKer/Backfill analysis using the data we just collected
-    print("*** Performing AFKer/Backfill analysis ***")
-    print("Final data has " .. #t .. " players")
-    print("Initial list has " .. tCount(playerTracker.initialPlayerList) .. " players")
+    Debug("*** Performing AFKer/Backfill analysis ***")
+    Debug("Final data has " .. #t .. " players")
+    Debug("Initial list has " .. tCount(playerTracker.initialPlayerList) .. " players")
     
     -- Create AFKer list unless we joined in-progress (in which case AFK/backfill analysis isn't valid)
     local afkers = {}
@@ -2153,7 +2149,7 @@ local function CollectScoreData(attemptNumber)
                     faction = playerInfo.faction or "Unknown"
                 }
                 table.insert(afkers, afkerData)
-                print("AFKer: " .. playerKey .. " (" .. afkerData.class .. " " .. afkerData.faction .. " - in initial, not in final)")
+                Debug("AFKer: " .. playerKey .. " (" .. afkerData.class .. " " .. afkerData.faction .. " - in initial, not in final)")
             end
         end
     else
@@ -2170,18 +2166,18 @@ local function CollectScoreData(attemptNumber)
             player.isBackfill = isCurrent
             player.participationUnknown = not isCurrent
             if isCurrent then
-                print("Backfill (self): " .. playerKey .. " (joined mid-match)")
+                Debug("Backfill (self): " .. playerKey .. " (joined mid-match)")
             else
-                print("Unknown participation: " .. playerKey .. " (joined mid-match)")
+                Debug("Unknown participation: " .. playerKey .. " (joined mid-match)")
             end
         else
             -- Normal join: use standard logic
             if not playerTracker.initialPlayerList[playerKey] then
                 player.isBackfill = true
-                print("Backfill: " .. playerKey .. " (not in initial)")
+                Debug("Backfill: " .. playerKey .. " (not in initial)")
             else
                 player.isBackfill = false
-                print("Normal: " .. playerKey .. " (in initial)")
+                Debug("Normal: " .. playerKey .. " (in initial)")
             end
             player.participationUnknown = false
         end
@@ -2190,7 +2186,7 @@ local function CollectScoreData(attemptNumber)
     -- Store AFKer list for later use in exports
     playerTracker.detectedAFKers = afkers
     
-    print("Analysis complete: " .. #afkers .. " AFKers, " .. #t .. " final players")
+    Debug("Analysis complete: " .. #afkers .. " AFKers, " .. #t .. " final players")
     
     return t
 end
@@ -4075,10 +4071,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             
             if isBattleStartMessage and not isPreparationMessage then
                 playerTracker.battleHasBegun = true
-                print("*** BATTLE HAS BEGUN detected via chat message: " .. message .. " ***")
+                Debug("*** BATTLE HAS BEGUN detected via chat message: " .. message .. " ***")
                 Debug("Battle begun flag set to true")
             elseif isPreparationMessage then
-                print("*** PREPARATION MESSAGE detected (ignoring): " .. message .. " ***")
+                Debug("*** PREPARATION MESSAGE detected (ignoring): " .. message .. " ***")
             end
         end
         
