@@ -725,16 +725,16 @@ local initialPlayerCount = 0
 
 -- CONSERVATIVE match start detection - requires multiple confirmations
 local function IsMatchStarted()
-    print("*** IsMatchStarted() called ***")
+    Debug("*** IsMatchStarted() called ***")
     local rows = GetNumBattlefieldScores()
     if rows == 0 then 
-        print("IsMatchStarted: No battlefield scores available")
+        Debug("IsMatchStarted: No battlefield scores available")
         return false 
     end
     
     -- REQUIREMENT 1: Must have "battle has begun" message
     if not playerTracker.battleHasBegun then
-        print("IsMatchStarted: Battle has not begun yet (no battle start message)")
+        Debug("IsMatchStarted: Battle has not begun yet (no battle start message)")
         return false
     end
     
@@ -742,18 +742,18 @@ local function IsMatchStarted()
     local apiDuration = 0
     if C_PvP and C_PvP.GetActiveMatchDuration then
         apiDuration = C_PvP.GetActiveMatchDuration() or 0
-        print("IsMatchStarted: API duration = " .. apiDuration .. " seconds")
+        Debug("IsMatchStarted: API duration = " .. apiDuration .. " seconds")
         
         -- If API shows active duration > 5 seconds, match has definitely started
         if apiDuration > 5 then
-            print("IsMatchStarted: CONFIRMED via API duration > 5 seconds")
+            Debug("IsMatchStarted: CONFIRMED via API duration > 5 seconds")
             return true
         elseif apiDuration == 0 then
-            print("IsMatchStarted: API shows 0 duration - match not started")
+            Debug("IsMatchStarted: API shows 0 duration - match not started")
             return false
         end
     else
-        print("IsMatchStarted: API duration not available")
+        Debug("IsMatchStarted: API duration not available")
     end
     
     -- REQUIREMENT 3: Both factions must be visible (fallback check)
@@ -814,37 +814,37 @@ end
 
 -- Capture initial player list (call this after match starts, when both teams are visible)
 local function CaptureInitialPlayerList(skipMatchStartCheck)
-    print("*** CaptureInitialPlayerList called (skipMatchStartCheck=" .. tostring(skipMatchStartCheck) .. ") ***")
-    print("Already captured: " .. tostring(playerTracker.initialListCaptured))
+    Debug("*** CaptureInitialPlayerList called (skipMatchStartCheck=" .. tostring(skipMatchStartCheck) .. ") ***")
+    Debug("Already captured: " .. tostring(playerTracker.initialListCaptured))
     
     if playerTracker.initialListCaptured then 
-        print("Initial player list already captured, skipping")
+        Debug("Initial player list already captured, skipping")
         return 
     end
     
     -- Critical: Only capture if match has actually started (both teams visible)
     -- Skip this check if called from a reliable source like PVP_MATCH_STATE_CHANGED
     if not skipMatchStartCheck and not IsMatchStarted() then
-        print("Match hasn't started yet (enemy team not visible), skipping initial capture")
+        Debug("Match hasn't started yet (enemy team not visible), skipping initial capture")
         return
     end
     
     if skipMatchStartCheck then
-        print("*** SKIPPING MATCH START VALIDATION - called from reliable event source ***")
-        print("Proceeding directly to capture logic")
+        Debug("*** SKIPPING MATCH START VALIDATION - called from reliable event source ***")
+        Debug("Proceeding directly to capture logic")
     else
-        print("Using match start validation (called from fallback/debug)")
+        Debug("Using match start validation (called from fallback/debug)")
     end
     
     local rows = GetNumBattlefieldScores()
-    print("Battlefield scores available: " .. rows)
+    Debug("Battlefield scores available: " .. rows)
     
     if rows == 0 then 
-        print("No battlefield scores available yet, skipping initial capture")
+        Debug("No battlefield scores available yet, skipping initial capture")
         return 
     end
     
-    print("*** MATCH HAS STARTED - Starting initial capture with " .. rows .. " players ***")
+    Debug("*** MATCH HAS STARTED - Starting initial capture with " .. rows .. " players ***")
     
     -- Clear any existing data
     playerTracker.initialPlayerList = {}
@@ -854,7 +854,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     if GetNormalizedRealmName and GetNormalizedRealmName() ~= "" then
         playerRealm = GetNormalizedRealmName()
     end
-    print("Using player realm: '" .. playerRealm .. "'")
+    Debug("Using player realm: '" .. playerRealm .. "'")
     
     local processedCount = 0
     local skippedCount = 0
@@ -4103,10 +4103,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     elseif e == "PVP_MATCH_STATE_CHANGED" and insideBG then
         local matchState = ...
         Debug("PVP_MATCH_STATE_CHANGED: " .. tostring(matchState))
-        print("*** BGLogger: PVP_MATCH_STATE_CHANGED event received ***")
-        print("Match state parameter: '" .. tostring(matchState) .. "'")
-        print("Inside BG: " .. tostring(insideBG))
-        print("Initial list captured: " .. tostring(playerTracker.initialListCaptured))
+        Debug("*** BGLogger: PVP_MATCH_STATE_CHANGED event received ***")
+        Debug("Match state parameter: '" .. tostring(matchState) .. "'")
+        Debug("Inside BG: " .. tostring(insideBG))
+        Debug("Initial list captured: " .. tostring(playerTracker.initialListCaptured))
         
         -- Resolve actual match state early
         local actualMatchState = matchState
