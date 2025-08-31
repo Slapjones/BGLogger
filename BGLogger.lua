@@ -2153,7 +2153,7 @@ local function CollectScoreData(attemptNumber)
             end
         end
     else
-        print("Joined in-progress: suppressing AFKer detection for this log")
+        Debug("Joined in-progress: suppressing AFKer detection for this log")
     end
     
     -- Set participation flags for each player in final data
@@ -3935,7 +3935,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     end
                     
                     -- Method 2: Check if both teams are immediately visible (fallback)
-                    if not isInProgressBG then
+                    -- Restrict this heuristic to epic BGs only to avoid false positives on regular maps
+                    if not isInProgressBG and IsEpicBattleground() then
                         local rows = GetNumBattlefieldScores()
                         if rows > 0 then
                             local allianceCount, hordeCount = 0, 0
@@ -3949,7 +3950,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                                     end
                                 end
                             end
-                            -- If both teams visible immediately, likely in-progress
+                            -- If both teams visible immediately on an epic map, likely in-progress
                             if allianceCount > 0 and hordeCount > 0 then
                                 isInProgressBG = true
                                 detectionMethod = "both_teams_visible_immediately"
@@ -3959,16 +3960,16 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     end
                     
                     if isInProgressBG then
-                        print("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
-                        print("Detection method: " .. detectionMethod)
-                        print("Player joined an ongoing match - adjusting tracking behavior")
+                        Debug("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
+                        Debug("Detection method: " .. detectionMethod)
+                        Debug("Player joined an ongoing match - adjusting tracking behavior")
                         
                         -- Set flags to indicate this is an in-progress join
                         playerTracker.joinedInProgress = true
                         playerTracker.battleHasBegun = true -- Match has obviously started
                         
                         -- Capture current state as "initial" list (best we can do)
-                        print("*** Capturing current player state as baseline (in-progress join) ***")
+                        Debug("*** Capturing current player state as baseline (in-progress join) ***")
                         CaptureInitialPlayerList(true) -- Skip match start validation
                         
                         -- Mark the player themselves as a backfill candidate
@@ -4007,7 +4008,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             -- Fallback: Set battleHasBegun flag after reasonable delay if no chat message comes
             C_Timer.After(90, function() -- 1.5 minutes after entering BG
                 if insideBG and not playerTracker.battleHasBegun then
-                    print("*** FALLBACK: Setting battleHasBegun flag (no start message received) ***")
+                    Debug("*** FALLBACK: Setting battleHasBegun flag (no start message received) ***")
                     playerTracker.battleHasBegun = true
                     Debug("Battle begun flag set via fallback timer")
                 end
