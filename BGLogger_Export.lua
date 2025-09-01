@@ -242,7 +242,8 @@ function ExportBattleground(key)
 		validForStats = data.validForStats or false
 	}
 
-	-- Compute v2 deep hash over the entire payload except integrity
+	-- Always compute v2 at export to ensure correct format and parity
+	exportData.integrity = exportData.integrity or {}
 	local forHashV2 = {
 		battleground = exportData.battleground,
 		date = exportData.date,
@@ -255,21 +256,10 @@ function ExportBattleground(key)
 		joinedInProgress = exportData.joinedInProgress,
 		validForStats = exportData.validForStats
 	}
-	local v2Hash, v2Meta = GenerateDataHashV2FromExport(forHashV2)
-
-	-- Attach/upgrade integrity block for v2 while preserving legacy fields
-	exportData.integrity = exportData.integrity or {}
+	local v2Hash, _ = GenerateDataHashV2FromExport(forHashV2)
 	exportData.integrity.hash = v2Hash
-	exportData.integrity.generatedAt = exportData.integrity.generatedAt or (GetServerTime and GetServerTime() or time())
-	exportData.integrity.serverTime = exportData.integrity.serverTime or (GetServerTime and GetServerTime() or time())
 	exportData.integrity.version = "BGLogger_v2.0"
-	-- Normalize metadata to reflect v2 to avoid confusion
-	exportData.integrity.metadata = exportData.integrity.metadata or {}
-	exportData.integrity.metadata.algorithm = "deep_v2"
-	exportData.integrity.metadata.playerCount = #exportPlayers
-
-	D("Computed v2 integrity hash: " .. tostring(v2Hash))
-
+	exportData.integrity.metadata = { algorithm = "deep_v2", playerCount = #exportPlayers }
 	D("Export using integrity hash (v2): " .. (exportData.integrity and exportData.integrity.hash or "missing"))
 	D("Export includes " .. #exportPlayers .. " total players, " .. #afkersList .. " AFKers")
 

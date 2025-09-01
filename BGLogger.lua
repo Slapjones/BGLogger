@@ -19,6 +19,7 @@ local ALLOW_TEST_EXPORTS     = DEBUG_MODE
 -- 32-bit overflow detection constants
 local UINT32_LIMIT           = 4294967295  -- 32-bit unsigned integer limit
 local OVERFLOW_DETECTION_THRESHOLD = UINT32_LIMIT * 0.8  -- Detect when approaching overflow
+local UINT32_RANGE           = UINT32_LIMIT + 1  -- 2^32 wrap amount to add per overflow
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
 
 -- Overflow tracking timer
@@ -186,12 +187,27 @@ local function TrackPlayerStats()
         if success and s and s.name then
             local playerName, realmName = s.name, ""
             
-            -- Get player key
+            -- Normalize realm like CollectScoreData to keep keys consistent
             if s.name:find("-") then
                 playerName, realmName = s.name:match("^(.+)-(.+)$")
-            else
+            end
+
+            if (not realmName or realmName == "") and s.realm then
+                realmName = s.realm
+            end
+
+            if (not realmName or realmName == "") and s.guid then
+                local _, _, _, _, _, _, _, realmFromGUID = GetPlayerInfoByGUID(s.guid)
+                if realmFromGUID and realmFromGUID ~= "" then
+                    realmName = realmFromGUID
+                end
+            end
+
+            if not realmName or realmName == "" then
                 realmName = GetRealmName() or "Unknown-Realm"
             end
+
+            realmName = realmName:gsub("%s+", ""):gsub("'", "")
             
             local playerKey = GetPlayerKey(playerName, realmName)
             local currentDamage = s.damageDone or s.damage or 0
@@ -240,8 +256,8 @@ local function GetCorrectedStats(playerKey, rawDamage, rawHealing)
         return rawDamage, rawHealing
     end
     
-    local correctedDamage = rawDamage + (overflowData.damageOverflows * UINT32_LIMIT)
-    local correctedHealing = rawHealing + (overflowData.healingOverflows * UINT32_LIMIT)
+    local correctedDamage = rawDamage + (overflowData.damageOverflows * UINT32_RANGE)
+    local correctedHealing = rawHealing + (overflowData.healingOverflows * UINT32_RANGE)
     
     if overflowData.damageOverflows > 0 or overflowData.healingOverflows > 0 then
         Debug("CORRECTED STATS for " .. playerKey .. ":")
@@ -706,7 +722,7 @@ local function StartOverflowTracking()
     end
     
     Debug("Starting overflow tracking")
-    overflowTrackingTimer = C_Timer.NewTicker(8, function() -- Check every 8 seconds (faster detection)
+    overflowTrackingTimer = C_Timer.NewTicker(5, function() -- Check every 5 seconds
         TrackPlayerStats()
     end)
 end
@@ -2338,17 +2354,41 @@ local function CommitMatch(list)
         local mapInfo = C_Map.GetMapInfo(map)
         local mapName = (mapInfo and mapInfo.name) or "Unknown Battleground"
         
-        -- GENERATE HASH IMMEDIATELY with current live data
-        local battlegroundMetadata = {
-            battleground = mapName,
-            duration = duration,
-            winner = winner,
-            type = bgType,
-            date = date("!%Y-%m-%dT%H:%M:%SZ")
-        }
+        -- GENERATE HASH IMMEDIATELY (v2 deep hash over export-shaped payload)
+        -- Build export-like players table (use strings for certain numeric fields to match export)
+        local exportPlayers = {}
+        for _, p in ipairs(list) do
+            table.insert(exportPlayers, {
+                name = p.name,
+                realm = p.realm,
+                faction = p.faction,
+                class = p.class,
+                spec = p.spec,
+                damage = tostring(p.damage or p.dmg or 0),
+                healing = tostring(p.healing or p.heal or 0),
+                kills = p.kills or p.killingBlows or p.kb or 0,
+                deaths = p.deaths or 0,
+                honorableKills = p.honorableKills or 0,
+                objectives = p.objectives or 0,
+                objectiveBreakdown = p.objectiveBreakdown or {},
+                isBackfill = p.isBackfill or false
+            })
+        end
         
-        local dataHash, hashMetadata = GenerateDataHash(battlegroundMetadata, list)
-        Debug("Generated hash at save time: " .. dataHash)
+        local forHashV2 = {
+            battleground = mapName,
+            date = date("!%Y-%m-%dT%H:%M:%SZ"),
+            type = bgType,
+            duration = tostring(duration or 0),
+            trueDuration = tostring(trueDuration or duration or 0),
+            winner = winner,
+            players = exportPlayers,
+            afkers = playerTracker.detectedAFKers or {},
+            joinedInProgress = playerTracker.joinedInProgress or false,
+            validForStats = not (playerTracker.joinedInProgress or false)
+        }
+        local dataHash, hashMetadata = GenerateDataHashV2FromExport(forHashV2)
+        Debug("Generated v2 hash at save time: " .. dataHash)
         
         local key = map.."_"..date("!%Y%m%d_%H%M%S")
         Debug("Saving match with key: " .. key)
@@ -2376,13 +2416,13 @@ local function CommitMatch(list)
             playerJoinedInProgress = playerTracker.playerJoinedInProgress or false,
             validForStats = not (playerTracker.joinedInProgress or false),
             
-            -- INTEGRITY DATA - Generated at save time, not export time
+            -- INTEGRITY DATA - v2 generated at save time
             integrity = {
                 hash = dataHash,
-                metadata = hashMetadata,
+                metadata = { algorithm = "deep_v2", playerCount = #list },
                 generatedAt = GetServerTime(),
                 serverTime = GetServerTime(),
-                version = "BGLogger_v1.0",
+                version = "BGLogger_v2.0",
                 realm = GetRealmName() or "Unknown"
             }
         }

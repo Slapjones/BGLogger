@@ -16,6 +16,7 @@ local function SimpleStringHash(str)
 	local hash = 5381
 	for i = 1, #str do
 		local byte = string.byte(str, i)
+		-- Match backend: 31-bit modulo and 8-char uppercase hex output
 		hash = ((hash * 33) + byte) % 2147483647
 	end
 	return string.format("%08X", hash)
@@ -163,7 +164,7 @@ local function CanonicalizeValueV2(value)
     elseif vt == "table" then
         if IsArrayTable(value) then
             local elems = {}
-            -- Serialize present indices 1..max, ignoring gaps, then sort for order-insensitivity
+            -- Serialize each element and sort for order-insensitivity (matches backend)
             local maxIndex = 0
             for k in pairs(value) do if type(k) == "number" and k > maxIndex then maxIndex = k end end
             for i = 1, maxIndex do
