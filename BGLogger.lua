@@ -6,8 +6,9 @@ BGLoggerDB = BGLoggerDB or {}
 -- Config / globals
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
-local LINE_HEIGHT            = 18
-local WIN_W, WIN_H           = 1400, 800
+local LINE_HEIGHT            = 20
+local ROW_PADDING_Y          = 2
+local WIN_W, WIN_H           = 1380, 820
 local insideBG, matchSaved   = false, false
 local bgStartTime            = 0
 local MIN_BG_TIME            = 30  -- Minimum seconds in BG before saving
@@ -2840,63 +2841,255 @@ end
 -- UI factory - completely rebuilt with proper column positioning
 ---------------------------------------------------------------------
 
--- Column positions (left edge of each column)
-local COLUMN_POSITIONS = {
-    name = 10,       -- Player name
-    realm = 140,     -- Realm  
-    class = 280,     -- Class
-    spec = 380,      -- Spec
-    faction = 480,   -- Faction
-    damage = 560,    -- Damage
-    healing = 660,   -- Healing
-    kills = 760,     -- Kills
-    deaths = 800,    -- Deaths
-    objectives = 840, -- Objectives
-    hk = 880,        -- Honorable Kills
-    status = 940     -- Status
+local COLUMN_ORDER = {
+    "name",
+    "realm",
+    "class",
+    "spec",
+    "faction",
+    "damage",
+    "healing",
+    "kills",
+    "deaths",
+    "objectives",
+    "hk",
+    "status"
 }
 
--- Column widths
-local COLUMN_WIDTHS = {
-    name = 125,      -- Player name
-    realm = 135,     -- Realm
-    class = 95,      -- Class  
-    spec = 95,       -- Spec
-    faction = 75,    -- Faction
-    damage = 95,     -- Damage
-    healing = 95,    -- Healing
-    kills = 35,      -- Kills
-    deaths = 35,     -- Deaths
-    objectives = 35, -- Objectives
-    hk = 55,         -- Honorable Kills
-    status = 60      -- Status
+local COLUMN_HEADERS = {
+    name = "Player",
+    realm = "Realm",
+    class = "Class",
+    spec = "Spec",
+    faction = "Faction",
+    damage = "Damage",
+    healing = "Healing",
+    kills = "Kills",
+    deaths = "Deaths",
+    objectives = "Objectives",
+    hk = "HK",
+    status = "Status"
 }
+
+local COLUMN_ALIGNMENT = {
+    name = "LEFT",
+    realm = "LEFT",
+    class = "CENTER",
+    spec = "CENTER",
+    faction = "CENTER",
+    damage = "RIGHT",
+    healing = "RIGHT",
+    kills = "CENTER",
+    deaths = "CENTER",
+    objectives = "CENTER",
+    hk = "CENTER",
+    status = "LEFT"
+}
+
+local COLUMN_WIDTHS = {
+    name = 170,
+    realm = 120,
+    class = 90,
+    spec = 110,
+    faction = 80,
+    damage = 100,
+    healing = 100,
+    kills = 50,
+    deaths = 50,
+    objectives = 80,
+    hk = 70,
+    status = 100
+}
+
+local COLUMN_GAP = 8
+local DETAIL_LEFT_PADDING = 12
+local COLUMN_POSITIONS = {}
+local DETAIL_CONTENT_WIDTH = 0
+
+do
+    local x = DETAIL_LEFT_PADDING
+    for _, key in ipairs(COLUMN_ORDER) do
+        COLUMN_POSITIONS[key] = x
+        x = x + COLUMN_WIDTHS[key] + COLUMN_GAP
+    end
+    DETAIL_CONTENT_WIDTH = x - COLUMN_GAP + DETAIL_LEFT_PADDING
+end
+
+local SORTABLE_FIELDS = {
+    damage = {
+        label = "Damage",
+        accessor = function(row)
+            return row.damage or row.dmg or 0
+        end
+    },
+    healing = {
+        label = "Healing",
+        accessor = function(row)
+            return row.healing or row.heal or 0
+        end
+    },
+    kills = {
+        label = "Kills",
+        accessor = function(row)
+            return row.kills or row.killingBlows or row.kb or 0
+        end
+    },
+    deaths = {
+        label = "Deaths",
+        accessor = function(row)
+            return row.deaths or 0
+        end
+    },
+    objectives = {
+        label = "Objectives",
+        accessor = function(row)
+            return row.objectives or 0
+        end
+    },
+    hk = {
+        label = "HK",
+        accessor = function(row)
+            return row.honorableKills or row.honorKills or row.hk or 0
+        end
+    }
+}
+
+local DETAIL_ROW_COLORS = {
+    even = {0.08, 0.08, 0.10, 0.78},
+    odd = {0.10, 0.10, 0.12, 0.78},
+    backfill = {0.17, 0.14, 0.04, 0.85},
+    unknown = {0.12, 0.12, 0.12, 0.80},
+    totals = {0.14, 0.14, 0.18, 0.92},
+    summary = {0.11, 0.11, 0.16, 0.88},
+    header = {0.14, 0.14, 0.18, 0.95},
+    section = {0.11, 0.11, 0.15, 0.80},
+    afkHeader = {0.28, 0.12, 0.12, 0.92},
+    afkRow = {0.22, 0.09, 0.09, 0.85}
+}
+
+local DETAIL_TEXT_COLORS = {
+    default = {0.90, 0.92, 0.96},
+    header = {1.0, 1.0, 0.72},
+    totals = {1.0, 1.0, 0.85},
+    section = {0.78, 0.78, 0.82},
+    backfill = {1.0, 0.94, 0.55},
+    unknown = {0.82, 0.82, 0.82},
+    afk = {1.0, 0.80, 0.80}
+}
+
+local DIVIDER_COLOR_DEFAULT = {0.25, 0.25, 0.32, 0.55}
+local DIVIDER_COLOR_HEADER = {0.30, 0.30, 0.38, 0.70}
+
+local function GetSortableValue(row, field)
+    if not row or not SORTABLE_FIELDS[field] then
+        return 0
+    end
+    local ok, value = pcall(SORTABLE_FIELDS[field].accessor, row)
+    if not ok then
+        return 0
+    end
+    return tonumber(value) or 0
+end
+
+local function SetDetailSort(field)
+    if not field or not SORTABLE_FIELDS[field] then
+        return
+    end
+    if not WINDOW then
+        return
+    end
+    if WINDOW.detailSortField == field then
+        WINDOW.detailSortDirection = (WINDOW.detailSortDirection == "asc") and "desc" or "asc"
+    else
+        WINDOW.detailSortField = field
+        WINDOW.detailSortDirection = "desc"
+    end
+    if WINDOW.currentView == "detail" and WINDOW.currentKey then
+        ShowDetail(WINDOW.currentKey)
+    end
+end
+
+local function StyleDetailLine(line, options)
+    options = options or {}
+
+    local showDividers = options.showDividers
+    if showDividers == nil then
+        showDividers = true
+    end
+
+    local style = options.style
+    if style and DETAIL_ROW_COLORS[style] then
+        if not line.background then
+            line.background = line:CreateTexture(nil, "BACKGROUND")
+            line.background:SetAllPoints()
+        end
+        line.background:SetColorTexture(unpack(DETAIL_ROW_COLORS[style]))
+        line.background:Show()
+    elseif line.background then
+        line.background:Hide()
+    end
+
+    local textColorKey = options.textColor or "default"
+    local textColor = DETAIL_TEXT_COLORS[textColorKey] or DETAIL_TEXT_COLORS.default
+    for _, columnName in ipairs(COLUMN_ORDER) do
+        line.columns[columnName]:SetTextColor(unpack(textColor))
+    end
+
+    if line.columnDividers then
+        for _, divider in ipairs(line.columnDividers) do
+            if showDividers then
+                local dividerColor = options.dividerColor or DIVIDER_COLOR_DEFAULT
+                divider:SetColorTexture(unpack(dividerColor))
+                divider:Show()
+            else
+                divider:Hide()
+            end
+        end
+    end
+end
 
 local function MakeDetailLine(parent, i)
-    local lineFrame = CreateFrame("Frame", nil, parent)
-    lineFrame:SetPoint("TOPLEFT", 0, -(i-1)*LINE_HEIGHT)
-    lineFrame:SetSize(WIN_W-40, LINE_HEIGHT)
+    local lineFrame = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    lineFrame:SetPoint("TOPLEFT", 0, -((i-1) * (LINE_HEIGHT + ROW_PADDING_Y)))
+    lineFrame:SetSize(DETAIL_CONTENT_WIDTH + DETAIL_LEFT_PADDING * 2, LINE_HEIGHT + ROW_PADDING_Y)
     
-    -- Create individual FontStrings for each column
-    local columns = {}
-    
-    for columnName, xPos in pairs(COLUMN_POSITIONS) do
-        local fs = lineFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        fs:SetPoint("TOPLEFT", xPos, 0)
-        fs:SetSize(COLUMN_WIDTHS[columnName], LINE_HEIGHT)
-        fs:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
-        fs:SetJustifyH("CENTER")
-        fs:SetJustifyV("MIDDLE")
-        fs:SetTextColor(1, 1, 1)
-        columns[columnName] = fs
+    if i == 1 then
+        lineFrame.leftDivider = lineFrame:CreateTexture(nil, "BACKGROUND")
+        lineFrame.leftDivider:SetColorTexture(unpack(DIVIDER_COLOR_HEADER))
+        lineFrame.leftDivider:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 6, ROW_PADDING_Y * 0.5)
+        lineFrame.leftDivider:SetPoint("BOTTOMLEFT", DETAIL_LEFT_PADDING - 6, -ROW_PADDING_Y * 0.5)
+        lineFrame.leftDivider:SetWidth(1)
     end
-    
-    -- Set specific alignment for certain columns
-    columns.name:SetJustifyH("LEFT")     -- Names left-aligned
-    columns.realm:SetJustifyH("LEFT")    -- Realms left-aligned  
-    columns.damage:SetJustifyH("RIGHT")  -- Numbers right-aligned
-    columns.healing:SetJustifyH("RIGHT") -- Numbers right-aligned
-    
+
+    local columns = {}
+    lineFrame.columnDividers = {}
+
+    for index, columnName in ipairs(COLUMN_ORDER) do
+        local xPos = COLUMN_POSITIONS[columnName]
+        local fontString = lineFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        fontString:SetPoint("TOPLEFT", xPos, -ROW_PADDING_Y * 0.5)
+        fontString:SetSize(COLUMN_WIDTHS[columnName], LINE_HEIGHT)
+        fontString:SetFont("Fonts\\ARIALN.TTF", 12, "")
+        fontString:SetJustifyH(COLUMN_ALIGNMENT[columnName] or "CENTER")
+        fontString:SetJustifyV("MIDDLE")
+        fontString:SetWordWrap(false)
+        fontString:SetTextColor(unpack(DETAIL_TEXT_COLORS.default))
+        columns[columnName] = fontString
+
+        if index < #COLUMN_ORDER then
+            local divider = lineFrame:CreateTexture(nil, "BACKGROUND")
+            divider:SetColorTexture(unpack(DIVIDER_COLOR_DEFAULT))
+            divider:SetPoint("TOPLEFT", xPos + COLUMN_WIDTHS[columnName] + (COLUMN_GAP * 0.5), ROW_PADDING_Y * 0.35)
+            divider:SetPoint("BOTTOMLEFT", xPos + COLUMN_WIDTHS[columnName] + (COLUMN_GAP * 0.5), -ROW_PADDING_Y * 0.35)
+            divider:SetWidth(1)
+            table.insert(lineFrame.columnDividers, divider)
+        end
+    end
+
+    if lineFrame.leftDivider then
+        table.insert(lineFrame.columnDividers, 1, lineFrame.leftDivider)
+    end
+
     lineFrame.columns = columns
     DetailLines[i] = lineFrame
     return lineFrame
@@ -3108,6 +3301,7 @@ function ShowDetail(key)
     
     -- Add battleground info header
     local headerInfo = DetailLines[1] or MakeDetailLine(WINDOW.detailContent, 1)
+    StyleDetailLine(headerInfo, { style = "header", textColor = "header", dividerColor = DIVIDER_COLOR_HEADER })
     local mapInfo = C_Map.GetMapInfo(data.mapID or 0)
     local mapName = (mapInfo and mapInfo.name) or "Unknown Map"
     
@@ -3128,52 +3322,111 @@ function ShowDetail(key)
     for columnName, column in pairs(headerInfo.columns) do
         if columnName ~= "name" then
             column:SetText("")
-        else
-            column:SetTextColor(0.9, 0.9, 1) -- Light blue for header
         end
     end
     headerInfo:Show()
     
     -- Add separator
     local separator1 = DetailLines[2] or MakeDetailLine(WINDOW.detailContent, 2)
+    StyleDetailLine(separator1, { showDividers = false })
+    if not separator1.dividerTexture then
+        separator1.dividerTexture = separator1:CreateTexture(nil, "BACKGROUND")
+        separator1.dividerTexture:SetColorTexture(0.35, 0.35, 0.45, 0.85)
+        separator1.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
+        separator1.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
+    end
+    separator1.dividerTexture:Show()
     for _, column in pairs(separator1.columns) do
-        column:SetText("═════") -- Unicode double line
-        column:SetTextColor(0.7, 0.7, 0.7) -- Gray color
+        column:SetText("")
     end
     separator1:Show()
     
     -- Column headers with perfect positioning
     local header = DetailLines[3] or MakeDetailLine(WINDOW.detailContent, 3)
-    header.columns.name:SetText("Player Name")
-    header.columns.realm:SetText("Realm") 
-    header.columns.class:SetText("Class")
-    header.columns.spec:SetText("Spec")
-    header.columns.faction:SetText("Faction")
-    header.columns.damage:SetText("Damage")
-    header.columns.healing:SetText("Healing")
-    header.columns.kills:SetText("K")
-    header.columns.deaths:SetText("D")
-    header.columns.objectives:SetText("Obj")
-    header.columns.hk:SetText("HK")
-    header.columns.status:SetText("Status")
-    
-    -- Make header text bold/colored
-    for _, column in pairs(header.columns) do
-        column:SetTextColor(1, 1, 0.5) -- Light yellow for headers
+    StyleDetailLine(header, { style = "header", textColor = "header", dividerColor = DIVIDER_COLOR_HEADER })
+
+    for _, columnName in ipairs(COLUMN_ORDER) do
+        local label = COLUMN_HEADERS[columnName]
+        if SORTABLE_FIELDS[columnName] then
+            local arrow = ""
+            if WINDOW.detailSortField == columnName then
+                arrow = WINDOW.detailSortDirection == "asc" and " ▲" or " ▼"
+            end
+            header.columns[columnName]:SetText(label .. arrow)
+            header.columns[columnName]:SetJustifyH("CENTER")
+            header.columns[columnName]:SetTextColor(unpack(DETAIL_TEXT_COLORS.header))
+            header:SetScript("OnMouseUp", nil)
+        else
+            header.columns[columnName]:SetText(label)
+        end
     end
+
+    header:SetScript("OnMouseUp", function(self, button)
+        if button ~= "LeftButton" then return end
+        local x, y = GetCursorPosition()
+        local scale = self:GetEffectiveScale()
+        x = x / scale
+        y = y / scale
+
+        local clickedField = nil
+        for _, columnName in ipairs(COLUMN_ORDER) do
+            if SORTABLE_FIELDS[columnName] then
+                local columnFS = header.columns[columnName]
+                local left = columnFS:GetLeft()
+                local right = columnFS:GetRight()
+                local top = columnFS:GetTop()
+                local bottom = columnFS:GetBottom()
+                if x >= left and x <= right and y >= bottom and y <= top then
+                    clickedField = columnName
+                    break
+                end
+            end
+        end
+
+        if clickedField then
+            PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+            SetDetailSort(clickedField)
+        end
+    end)
+
     header:Show()
     
     -- Add separator line under headers
     local separator2 = DetailLines[4] or MakeDetailLine(WINDOW.detailContent, 4)
+    StyleDetailLine(separator2, { showDividers = false })
+    if not separator2.dividerTexture then
+        separator2.dividerTexture = separator2:CreateTexture(nil, "BACKGROUND")
+        separator2.dividerTexture:SetColorTexture(0.28, 0.28, 0.34, 0.75)
+        separator2.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
+        separator2.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
+    end
+    separator2.dividerTexture:Show()
     for _, column in pairs(separator2.columns) do
-        column:SetText("─────") -- Unicode horizontal line character
-        column:SetTextColor(0.5, 0.5, 0.5) -- Gray color
+        column:SetText("")
     end
     separator2:Show()
     
     -- Get regular players (all players in stats since AFKers aren't in the final stats)
     local rows = data.stats or {}
     local regularPlayers = rows
+
+    if WINDOW.detailSortField and SORTABLE_FIELDS[WINDOW.detailSortField] then
+        table.sort(regularPlayers, function(a, b)
+            local aValue = GetSortableValue(a, WINDOW.detailSortField)
+            local bValue = GetSortableValue(b, WINDOW.detailSortField)
+            if WINDOW.detailSortDirection == "asc" then
+                if aValue == bValue then
+                    return (a.name or "") < (b.name or "")
+                end
+                return aValue < bValue
+            else
+                if aValue == bValue then
+                    return (a.name or "") < (b.name or "")
+                end
+                return aValue > bValue
+            end
+        end)
+    end
     
     -- Get AFKers from stored list
     local afkers = data.afkerList or {}
@@ -3181,6 +3434,16 @@ function ShowDetail(key)
     -- Build detail lines for regular players only
     for i, row in ipairs(regularPlayers) do
         local line = DetailLines[i+4] or MakeDetailLine(WINDOW.detailContent, i+4)
+        local participationUnknown = row.participationUnknown or false
+        local isBackfill = row.isBackfill or false
+        local styleKey
+        if participationUnknown then
+            styleKey = "unknown"
+        elseif isBackfill then
+            styleKey = "backfill"
+        else
+            styleKey = (i % 2 == 0) and "even" or "odd"
+        end
         
         -- Check for both new and legacy data format
         local damage = row.damage or row.dmg or 0
@@ -3195,8 +3458,12 @@ function ShowDetail(key)
         local faction = row.faction or row.side or "Unknown"
         
         -- Enhanced participation data
-        local isBackfill = row.isBackfill or false
-        local participationUnknown = row.participationUnknown or false
+        local textColor = DETAIL_TEXT_COLORS.default
+        if participationUnknown then
+            textColor = DETAIL_TEXT_COLORS.unknown
+        elseif isBackfill then
+            textColor = DETAIL_TEXT_COLORS.backfill
+        end
         
         -- Create status string
         local status = ""
@@ -3229,27 +3496,25 @@ function ShowDetail(key)
         line.columns.status:SetText(status)
             
         -- Color code the text based on status
-        local textColor = {1, 1, 1} -- Default white
-        if participationUnknown then
-            textColor = {0.8, 0.8, 0.8} -- Gray for unknown participation
-        elseif isBackfill then
-            textColor = {1, 1, 0.5} -- Yellow for backfill
-        end
-        
-        for _, column in pairs(line.columns) do
-            column:SetTextColor(textColor[1], textColor[2], textColor[3])
-        end
+        StyleDetailLine(line, { style = styleKey, textColor = participationUnknown and "unknown" or (isBackfill and "backfill" or "default") })
         line:Show()
     end
     
     -- Add summary footer for regular players
     local summaryLine = DetailLines[#regularPlayers+6] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+6)
+    StyleDetailLine(summaryLine, { showDividers = false })
+    if not summaryLine.dividerTexture then
+        summaryLine.dividerTexture = summaryLine:CreateTexture(nil, "BACKGROUND")
+        summaryLine.dividerTexture:SetColorTexture(0.24, 0.24, 0.30, 0.75)
+        summaryLine.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
+        summaryLine.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
+    end
+    summaryLine.dividerTexture:Show()
     for _, column in pairs(summaryLine.columns) do
-        column:SetText("─────") 
-        column:SetTextColor(0.5, 0.5, 0.5) -- Gray color
+        column:SetText("")
     end
     summaryLine:Show()
-    
+
     local totalLine = DetailLines[#regularPlayers+7] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+7)
     local totalDamage, totalHealing, totalKills, totalDeaths = 0, 0, 0, 0
     local backfillCount = 0
@@ -3285,9 +3550,7 @@ function ShowDetail(key)
     totalLine.columns.status:SetText("") -- Empty
     
     -- Make totals bold/colored
-    for _, column in pairs(totalLine.columns) do
-        column:SetTextColor(1, 1, 0.8) -- Light yellow for totals
-    end
+    StyleDetailLine(totalLine, { style = "totals", textColor = "totals" })
     totalLine:Show()
     
     local currentLineIndex = #regularPlayers + 8
@@ -3295,10 +3558,15 @@ function ShowDetail(key)
     -- Add backfill summary for regular players
     if backfillCount > 0 then
         local backfillSummaryLine = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
+        if not backfillSummaryLine.background then
+            backfillSummaryLine.background = backfillSummaryLine:CreateTexture(nil, "BACKGROUND")
+            backfillSummaryLine.background:SetAllPoints()
+        end
+        backfillSummaryLine.background:SetColorTexture(unpack(DETAIL_ROW_COLORS.summary))
         backfillSummaryLine.columns.name:SetText("Backfills among active players: " .. backfillCount)
         for columnName, column in pairs(backfillSummaryLine.columns) do
             if columnName == "name" then
-                column:SetTextColor(1, 1, 0) -- Yellow text
+                column:SetTextColor(unpack(DETAIL_TEXT_COLORS.section))
             else
                 column:SetText("")
             end
@@ -3311,6 +3579,14 @@ function ShowDetail(key)
     if #afkers > 0 then
         -- Add separator before AFKer section
         local afkerSeparator = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
+        StyleDetailLine(afkerSeparator, { showDividers = false })
+        if not afkerSeparator.dividerTexture then
+            afkerSeparator.dividerTexture = afkerSeparator:CreateTexture(nil, "BACKGROUND")
+            afkerSeparator.dividerTexture:SetColorTexture(0.30, 0.24, 0.24, 0.80)
+            afkerSeparator.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
+            afkerSeparator.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
+        end
+        afkerSeparator.dividerTexture:Show()
         for _, column in pairs(afkerSeparator.columns) do
             column:SetText("")
         end
@@ -3319,10 +3595,11 @@ function ShowDetail(key)
         
         -- AFKer section header
         local afkerHeader = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
+        StyleDetailLine(afkerHeader, { style = "afkHeader", textColor = "afk" })
         afkerHeader.columns.name:SetText("AFK/Early Leavers (" .. #afkers .. " players):")
         for columnName, column in pairs(afkerHeader.columns) do
             if columnName == "name" then
-                column:SetTextColor(1, 0.5, 0.5) -- Red text
+                column:SetTextColor(unpack(DETAIL_TEXT_COLORS.afk))
             else
                 column:SetText("")
             end
@@ -3333,14 +3610,13 @@ function ShowDetail(key)
         -- List each AFKer with enhanced information
         for i, afker in ipairs(afkers) do
             local afkerLine = DetailLines[currentLineIndex] or MakeDetailLine(WINDOW.detailContent, currentLineIndex)
+            StyleDetailLine(afkerLine, { style = "afkRow", textColor = "afk" })
             local playerString = afker.name .. "-" .. afker.realm
             local classInfo = (afker.class and afker.class ~= "Unknown") and (" (" .. afker.class .. " " .. (afker.faction or "") .. ")") or ""
             
             afkerLine.columns.name:SetText("  " .. playerString .. classInfo .. " (left before match ended)")
             for columnName, column in pairs(afkerLine.columns) do
-                if columnName == "name" then
-                    column:SetTextColor(1, 0.7, 0.7) -- Light red text
-                else
+                if columnName ~= "name" then
                     column:SetText("")
                 end
             end
@@ -3967,10 +4243,15 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     -- Method 1: Check API duration (most reliable)
                     if C_PvP and C_PvP.GetActiveMatchDuration then
                         local apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                        if apiDuration > 5 then -- Small buffer: >5s indicates the match already started before zoning in
+                        local timeInside = GetTime() - (bgStartTime or GetTime())
+                        local durationDelta = apiDuration - timeInside
+                        Debug(string.format("In-progress API check: apiDuration=%.1fs, timeInside=%.1fs, delta=%.1fs", apiDuration, timeInside, durationDelta))
+
+                        -- Require the duration to significantly exceed the time we've been inside
+                        if apiDuration > 5 and durationDelta >= 10 then
                             isInProgressBG = true
-                            detectionMethod = "API_duration_" .. apiDuration .. "s"
-                            Debug("IN-PROGRESS BG detected via API duration: " .. apiDuration .. " seconds (attempt " .. attempt .. ")")
+                            detectionMethod = string.format("API_duration_%ss_delta_%s", tostring(apiDuration), tostring(math.floor(durationDelta)))
+                            Debug("IN-PROGRESS BG detected via API duration delta (attempt " .. attempt .. ")")
                         end
                     end
                     
@@ -3980,21 +4261,32 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         local rows = GetNumBattlefieldScores()
                         if rows > 0 then
                             local allianceCount, hordeCount = 0, 0
+                            local myFaction = UnitFactionGroup("player")
+                            local allowedThreshold = (myFaction == "Alliance") and 10 or 6
+                            local visibleEnemy = 0
+
                             for i = 1, math.min(rows, 30) do
                                 local success, s = pcall(C_PvP.GetScoreInfo, i)
                                 if success and s and s.name then
-                                    if s.faction == 0 then
+                                    local factionId = s.faction or s.side
+                                    if factionId == 0 then
                                         hordeCount = hordeCount + 1
-                                    elseif s.faction == 1 then
+                                    elseif factionId == 1 then
                                         allianceCount = allianceCount + 1
+                                    end
+
+                                    if myFaction == "Alliance" and factionId == 1 then
+                                        visibleEnemy = visibleEnemy + 1
+                                    elseif myFaction == "Horde" and factionId == 0 then
+                                        visibleEnemy = visibleEnemy + 1
                                     end
                                 end
                             end
-                            -- If both teams visible immediately on an epic map, likely in-progress
-                            if allianceCount > 0 and hordeCount > 0 then
+
+                            if visibleEnemy >= allowedThreshold then
                                 isInProgressBG = true
-                                detectionMethod = "both_teams_visible_immediately"
-                                Debug("IN-PROGRESS BG detected via immediate team visibility (attempt " .. attempt .. ")")
+                                detectionMethod = string.format("enemy_visible_%d_players", visibleEnemy)
+                                Debug("IN-PROGRESS BG detected via enemy visibility threshold (attempt " .. attempt .. ")")
                             end
                         end
                     end

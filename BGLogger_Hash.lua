@@ -138,6 +138,11 @@ end
 -- Determine if a Lua table should be treated as an array (1..n sequence)
 local function IsArrayTable(t)
     if type(t) ~= "table" then return false end
+    -- Hint: if an 'n' field is present (common array length hint), treat as array even if empty
+    local nField = rawget(t, 'n')
+    if type(nField) == "number" then
+        return true
+    end
     local maxIndex = 0
     for k, _ in pairs(t) do
         if type(k) ~= "number" then
@@ -195,9 +200,95 @@ local function CanonicalizeValueV2(value)
     end
 end
 
+-- Build a normalized v2 payload mirroring the backend's buildHashPayloadV2
+local function ToStringSafeLua(v)
+    if v == nil then return "" end
+    return tostring(v)
+end
+
+local function ToNumberSafeLua(v)
+    local n = tonumber(v)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then return 0 end
+    return n
+end
+
+local function ToBooleanSafeLua(v)
+    return not not v
+end
+
+local function NormalizeObjectiveBreakdown(ob)
+    if type(ob) ~= "table" then return {} end
+    -- Treat empty arrays (and empty tables) as empty objects
+    -- We can't distinguish array vs object reliably in empty-case, so always return {}
+    -- Non-empty tables are returned as-is
+    for _ in pairs(ob) do
+        return ob
+    end
+    return {}
+end
+
+function BuildHashPayloadV2_FromExport(json)
+    local players = type(json.players) == "table" and json.players or {}
+    local afkers = type(json.afkers) == "table" and json.afkers or {}
+
+    local normPlayers = {}
+    for i = 1, #players do
+        local p = players[i]
+        if type(p) == "table" then
+            normPlayers[#normPlayers+1] = {
+                name = ToStringSafeLua(p.name),
+                realm = ToStringSafeLua(p.realm),
+                faction = ToStringSafeLua(p.faction),
+                class = ToStringSafeLua(p.class),
+                spec = ToStringSafeLua(p.spec),
+                damage = ToStringSafeLua(p.damage),
+                healing = ToStringSafeLua(p.healing),
+                kills = ToNumberSafeLua(p.kills),
+                deaths = ToNumberSafeLua(p.deaths),
+                honorableKills = ToNumberSafeLua(p.honorableKills),
+                objectives = ToNumberSafeLua(p.objectives),
+                objectiveBreakdown = NormalizeObjectiveBreakdown(p.objectiveBreakdown),
+                isBackfill = ToBooleanSafeLua(p.isBackfill)
+            }
+        end
+    end
+    -- Hint array-ness even when empty
+    normPlayers.n = #normPlayers
+
+    local normAfkers = {}
+    for i = 1, #afkers do
+        local a = afkers[i]
+        if type(a) == "table" then
+            normAfkers[#normAfkers+1] = {
+                name = ToStringSafeLua(a.name),
+                realm = ToStringSafeLua(a.realm),
+                faction = ToStringSafeLua(a.faction),
+                class = ToStringSafeLua(a.class)
+            }
+        end
+    end
+    -- Hint array-ness even when empty
+    normAfkers.n = #normAfkers
+
+    return {
+        battleground = ToStringSafeLua(json.battleground),
+        date = ToStringSafeLua(json.date),
+        type = ToStringSafeLua(json.type),
+        duration = ToStringSafeLua(json.duration),
+        trueDuration = ToStringSafeLua(json.trueDuration),
+        winner = ToStringSafeLua(json.winner),
+        players = normPlayers,
+        afkers = normAfkers,
+        joinedInProgress = ToBooleanSafeLua(json.joinedInProgress),
+        validForStats = ToBooleanSafeLua(json.validForStats)
+    }
+end
+
 -- Public: compute v2 hash from an export-like Lua table (without integrity)
 function GenerateDataHashV2FromExport(exportObject)
-    local dataString = CanonicalizeValueV2(exportObject)
+    -- Normalize first to mirror web's buildHashPayloadV2 behavior
+    local normalized = BuildHashPayloadV2_FromExport(exportObject)
+    local dataString = CanonicalizeValueV2(normalized)
     local hash = SimpleStringHash(dataString)
     local metadata = { algorithm = "deep_v2" }
     return hash, metadata
