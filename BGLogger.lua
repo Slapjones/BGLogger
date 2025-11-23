@@ -17,14 +17,33 @@ local GetWinner              = _G.GetBattlefieldWinner -- may be nil on some cli
 local DEBUG_MODE             = false -- Set to false for production, true for development
 local saveInProgress         = false
 local ALLOW_TEST_EXPORTS     = DEBUG_MODE
--- 32-bit overflow detection constants
-local UINT32_LIMIT           = 4294967295  -- 32-bit unsigned integer limit
-local OVERFLOW_DETECTION_THRESHOLD = UINT32_LIMIT * 0.8  -- Detect when approaching overflow
-local UINT32_RANGE           = UINT32_LIMIT + 1  -- 2^32 wrap amount to add per overflow
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
 
--- Overflow tracking timer
-local overflowTrackingTimer = nil
+-- Safe wrappers for scoreboard APIs (Midnight compatibility)
+local GetNumBattlefieldScores = _G.GetNumBattlefieldScores
+local RequestBattlefieldScoreData = _G.RequestBattlefieldScoreData
+if not GetNumBattlefieldScores then
+	local function _probeScoreRowCount()
+		local count = 0
+		if C_PvP and C_PvP.GetScoreInfo then
+			for i = 1, 80 do
+				local ok, s = pcall(C_PvP.GetScoreInfo, i)
+				if ok and s then
+					count = i
+				else
+					break
+				end
+			end
+		end
+		return count
+	end
+	GetNumBattlefieldScores = _probeScoreRowCount
+end
+if not RequestBattlefieldScoreData then
+	RequestBattlefieldScoreData = function() end
+end
+
+-- (overflow tracking removed for new expansion)
 
 -- Persisted per-battleground mapping of PVPStatID -> objective type
 BGLoggerDB.__ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap or {}
@@ -38,10 +57,6 @@ local playerTracker = {
     finalPlayerList = {},   -- Players present at match end (when we save)
     initialListCaptured = false,
     battleHasBegun = false,  -- Flag to track if we've seen the "battle has begun" message
-    -- Overflow detection tracking
-    damageHealing = {},     -- Track damage/healing values over time
-    lastCheck = {},         -- Last recorded values for each player
-    overflowDetected = {}   -- Track detected overflows
 }
 
 ---------------------------------------------------------------------
@@ -104,9 +119,6 @@ local function ResetPlayerTracker()
         playerTracker.firstAttemptStats = nil  -- Reset retry stats
         playerTracker.battleHasBegun = false
         playerTracker.detectedAFKers = {}
-        playerTracker.damageHealing = {}
-        playerTracker.lastCheck = {}
-        playerTracker.overflowDetected = {}
         -- In-progress BG tracking flags
         playerTracker.joinedInProgress = false
         playerTracker.playerJoinedInProgress = false
@@ -127,7 +139,12 @@ local function IsEpicBattleground()
     local info = mapId and C_Map.GetMapInfo and C_Map.GetMapInfo(mapId) or nil
     local name = (info and info.name or ""):lower()
     if name == "" then return false end
-    return name:find("alterac") or name:find("isle of conquest") or name:find("wintergrasp") or name:find("ashran") or false
+	return name:find("alterac") 
+		or name:find("isle of conquest") 
+		or name:find("wintergrasp") 
+		or name:find("ashran")
+		or name:find("slayer's rise")
+		or false
 end
 
 -- Count factions within a keyed player table { key -> { faction = "Alliance"|"Horde" } }
@@ -171,103 +188,8 @@ local function FixedWidthRight(text, width)
 end
 
 ---------------------------------------------------------------------
--- Overflow Detection Functions
+-- (Overflow detection removed for new expansion)
 ---------------------------------------------------------------------
-
--- Track and detect 32-bit integer overflow for damage/healing
-local function TrackPlayerStats()
-    if not insideBG then return end
-    
-    local rows = GetNumBattlefieldScores()
-    if rows == 0 then return end
-    
-    Debug("Tracking stats for overflow detection: " .. rows .. " players")
-    
-    for i = 1, rows do
-        local success, s = pcall(C_PvP.GetScoreInfo, i)
-        if success and s and s.name then
-            local playerName, realmName = s.name, ""
-            
-            -- Normalize realm like CollectScoreData to keep keys consistent
-            if s.name:find("-") then
-                playerName, realmName = s.name:match("^(.+)-(.+)$")
-            end
-
-            if (not realmName or realmName == "") and s.realm then
-                realmName = s.realm
-            end
-
-            if (not realmName or realmName == "") and s.guid then
-                local _, _, _, _, _, _, _, realmFromGUID = GetPlayerInfoByGUID(s.guid)
-                if realmFromGUID and realmFromGUID ~= "" then
-                    realmName = realmFromGUID
-                end
-            end
-
-            if not realmName or realmName == "" then
-                realmName = GetRealmName() or "Unknown-Realm"
-            end
-
-            realmName = realmName:gsub("%s+", ""):gsub("'", "")
-            
-            local playerKey = GetPlayerKey(playerName, realmName)
-            local currentDamage = s.damageDone or s.damage or 0
-            local currentHealing = s.healingDone or s.healing or 0
-            
-            -- Initialize tracking for new players
-            if not playerTracker.lastCheck[playerKey] then
-                playerTracker.lastCheck[playerKey] = {
-                    damage = currentDamage,
-                    healing = currentHealing,
-                    timestamp = GetTime()
-                }
-                playerTracker.overflowDetected[playerKey] = {
-                    damageOverflows = 0,
-                    healingOverflows = 0
-                }
-            else
-                local lastData = playerTracker.lastCheck[playerKey]
-                local overflowData = playerTracker.overflowDetected[playerKey]
-                
-                -- Check for damage overflow (current value significantly lower than previous)
-                if currentDamage < lastData.damage and lastData.damage > OVERFLOW_DETECTION_THRESHOLD then
-                    Debug("OVERFLOW DETECTED: " .. playerKey .. " damage dropped from " .. lastData.damage .. " to " .. currentDamage)
-                    overflowData.damageOverflows = overflowData.damageOverflows + 1
-                end
-                
-                -- Check for healing overflow
-                if currentHealing < lastData.healing and lastData.healing > OVERFLOW_DETECTION_THRESHOLD then
-                    Debug("OVERFLOW DETECTED: " .. playerKey .. " healing dropped from " .. lastData.healing .. " to " .. currentHealing)
-                    overflowData.healingOverflows = overflowData.healingOverflows + 1
-                end
-                
-                -- Update tracking data
-                lastData.damage = currentDamage
-                lastData.healing = currentHealing
-                lastData.timestamp = GetTime()
-            end
-        end
-    end
-end
-
--- Get corrected damage/healing values accounting for overflow
-local function GetCorrectedStats(playerKey, rawDamage, rawHealing)
-    local overflowData = playerTracker.overflowDetected[playerKey]
-    if not overflowData then
-        return rawDamage, rawHealing
-    end
-    
-    local correctedDamage = rawDamage + (overflowData.damageOverflows * UINT32_RANGE)
-    local correctedHealing = rawHealing + (overflowData.healingOverflows * UINT32_RANGE)
-    
-    if overflowData.damageOverflows > 0 or overflowData.healingOverflows > 0 then
-        Debug("CORRECTED STATS for " .. playerKey .. ":")
-        Debug("  Raw damage: " .. rawDamage .. " -> Corrected: " .. correctedDamage .. " (" .. overflowData.damageOverflows .. " overflows)")
-        Debug("  Raw healing: " .. rawHealing .. " -> Corrected: " .. correctedHealing .. " (" .. overflowData.healingOverflows .. " overflows)")
-    end
-    
-    return correctedDamage, correctedHealing
-end
 
 ---------------------------------------------------------------------
 -- Objective Data Collection Functions
@@ -715,27 +637,7 @@ local function GetObjectiveColumns(battlegroundName, playerDataList)
     return activeColumns
 end
 
--- Start periodic overflow tracking
-local function StartOverflowTracking()
-    if overflowTrackingTimer then
-        Debug("Overflow tracking already running")
-        return
-    end
-    
-    Debug("Starting overflow tracking")
-    overflowTrackingTimer = C_Timer.NewTicker(5, function() -- Check every 5 seconds
-        TrackPlayerStats()
-    end)
-end
-
--- Stop overflow tracking
-local function StopOverflowTracking()
-    if overflowTrackingTimer then
-        overflowTrackingTimer:Cancel()
-        overflowTrackingTimer = nil
-        Debug("Stopped overflow tracking")
-    end
-end
+-- (overflow tracking removed)
 
 -- Track initial player count to detect when enemy team becomes visible
 local initialPlayerCount = 0
@@ -745,8 +647,8 @@ local function IsMatchStarted()
     Debug("*** IsMatchStarted() called ***")
     local rows = GetNumBattlefieldScores()
     if rows == 0 then 
-        Debug("IsMatchStarted: No battlefield scores available")
-        return false 
+		Debug("IsMatchStarted: No battlefield scores available")
+		return false
     end
     
     -- REQUIREMENT 1: Must have "battle has begun" message
@@ -1977,7 +1879,8 @@ local function NormalizeBattlegroundName(mapName)
         ["Eye of the Storm"] = "Eye of the Storm",
         ["Strand of the Ancients"] = "Strand of the Ancients",
         ["Isle of Conquest"] = "Isle of Conquest",
-        ["Twin Peaks"] = "Twin Peaks"
+		["Twin Peaks"] = "Twin Peaks",
+		["Slayer's Rise"] = "Slayer's Rise"
     }
     
     return nameMap[mapName] or mapName
@@ -2086,10 +1989,6 @@ local function CollectScoreData(attemptNumber)
             local rawDamage = s.damageDone or s.damage or 0
             local rawHealing = s.healingDone or s.healing or 0
             
-            -- Apply overflow correction
-            local playerKey = GetPlayerKey(playerName, realmName)
-            local correctedDamage, correctedHealing = GetCorrectedStats(playerKey, rawDamage, rawHealing)
-            
             -- Extract objective data
             local map = C_Map.GetBestMapForUnit("player") or 0
             local mapInfo = C_Map.GetMapInfo(map)
@@ -2103,18 +2002,13 @@ local function CollectScoreData(attemptNumber)
                 faction = factionName,
                 class = className,
                 spec = specName,
-                damage = correctedDamage,
-                healing = correctedHealing,
+				damage = rawDamage,
+				healing = rawHealing,
                 kills = s.killingBlows or s.kills or 0,
                 deaths = s.deaths or 0,
                 honorableKills = s.honorableKills or s.honorKills or 0,
                 objectives = objectives,
                 objectiveBreakdown = objectiveBreakdown or {},
-                -- Overflow tracking data
-                rawDamage = rawDamage,
-                rawHealing = rawHealing,
-                damageOverflows = playerTracker.overflowDetected[playerKey] and playerTracker.overflowDetected[playerKey].damageOverflows or 0,
-                healingOverflows = playerTracker.overflowDetected[playerKey] and playerTracker.overflowDetected[playerKey].healingOverflows or 0,
                 -- Will be set later by the simple list comparison
                 isBackfill = false,
                 isAfker = false
@@ -2212,6 +2106,7 @@ local function DetectAvailableAPIs()
     local apis = {
         GetWinner = _G.GetBattlefieldWinner,
         IsRatedBattleground = _G.IsRatedBattleground,
+		IsWargame = _G.IsWargame,
         IsInBrawl = C_PvP and C_PvP.IsInBrawl,
         IsSoloRBG = C_PvP and C_PvP.IsSoloRBG,
         IsBattleground = C_PvP and C_PvP.IsBattleground,
@@ -2309,8 +2204,13 @@ local function CommitMatch(list)
                 -- SIMPLIFIED: Use reliable API calls for battleground type detection
         local bgType = "non-rated"
 
-        -- Method 1: Brawl detection (highest priority - overrides everything else)
-        if C_PvP and C_PvP.IsInBrawl and C_PvP.IsInBrawl() then
+		-- Method 0: Wargame detection (highest priority)
+		if IsWargame and IsWargame() then
+			bgType = "wargames"
+			Debug("Detected WARGAME via IsWargame()")
+		
+		-- Method 1: Brawl detection
+		elseif C_PvP and C_PvP.IsInBrawl and C_PvP.IsInBrawl() then
             bgType = "brawl"
             Debug("Detected BRAWL via C_PvP.IsInBrawl()")
         
@@ -4025,12 +3925,16 @@ SlashCmdList.BGLOGGER = function(msg)
             end
         end)
         return
+		elseif command == "apicheck" or command == "beta" then
+		DebugBGTypeDetection()
+		return
     elseif command == "help" then
         print("|cff00ffffBGLogger Commands:|r")
         print("|cffffffff/bgstats|r or |cffffffff/bglogger|r - Open/close BGLogger window")
         print("|cffffffff/bglogger debug|r - Toggle debug mode on/off")
         print("|cffffffff/bglogger testbreakdown|r - Test new objective breakdown system (in BG only)")
         print("|cffffffff/bglogger testretry|r - Test initial capture retry logic (in BG only)")
+		print("|cffffffff/bglogger apicheck|r - Check API availability (in BG shows live)")
         print("|cffffffff/bglogger help|r - Show this help")
         return
     end
@@ -4102,28 +4006,7 @@ C_Timer.After(1, function()
         DebugCollectScoreData = DebugCollectScoreData,
         CheckTrackingStatus = CheckTrackingStatus,
         ForceCaptureBypassed = ForceCaptureBypassed,
-        IsMatchStarted = IsMatchStarted,
-        DebugOverflowTracking = function()
-            if not insideBG then
-                print("Not in a battleground")
-                return
-            end
-            
-            print("=== Overflow Tracking Debug ===")
-            print("Total tracked players: " .. tCount(playerTracker.lastCheck))
-            
-            for playerKey, data in pairs(playerTracker.lastCheck) do
-                local overflows = playerTracker.overflowDetected[playerKey]
-                if overflows and (overflows.damageOverflows > 0 or overflows.healingOverflows > 0) then
-                    print("OVERFLOW DETECTED: " .. playerKey)
-                    print("  Damage overflows: " .. overflows.damageOverflows)
-                    print("  Healing overflows: " .. overflows.healingOverflows)
-                    print("  Current damage: " .. data.damage)
-                    print("  Current healing: " .. data.healing)
-                end
-            end
-            print("===============================")
-        end,
+		IsMatchStarted = IsMatchStarted,
         DebugObjectiveData = DebugObjectiveData,
         TestObjectiveCollection = TestObjectiveCollection,
         DebugInProgressDetection = DebugInProgressDetection,
@@ -4215,7 +4098,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             saveInProgress = false
             ResetPlayerTracker() -- Initialize player tracking
             initialPlayerCount = 0 -- Reset player count tracking
-            StartOverflowTracking() -- Start monitoring for overflow
+		-- (overflow tracking removed)
             
             -- CRITICAL: Check if this is an in-progress BG with multiple robust retries
             local function CheckInProgress(attempt)
@@ -4262,28 +4145,60 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         if rows > 0 then
                             local allianceCount, hordeCount = 0, 0
                             local myFaction = UnitFactionGroup("player")
+                            local enemyFactionId = nil
+                            if myFaction == "Alliance" then
+                                enemyFactionId = 0
+                            elseif myFaction == "Horde" then
+                                enemyFactionId = 1
+                            end
+
                             local allowedThreshold = (myFaction == "Alliance") and 10 or 6
+                            local activeEnemyThreshold = 3
                             local visibleEnemy = 0
+                            local activeEnemy = 0
 
                             for i = 1, math.min(rows, 30) do
                                 local success, s = pcall(C_PvP.GetScoreInfo, i)
                                 if success and s and s.name then
-                                    local factionId = s.faction or s.side
+                                    local factionId = s.faction
+                                    if factionId == nil then
+                                        if type(s.side) == "number" then
+                                            factionId = s.side
+                                        elseif type(s.side) == "string" then
+                                            if s.side == "Horde" then
+                                                factionId = 0
+                                            elseif s.side == "Alliance" then
+                                                factionId = 1
+                                            end
+                                        end
+                                    end
+
                                     if factionId == 0 then
                                         hordeCount = hordeCount + 1
                                     elseif factionId == 1 then
                                         allianceCount = allianceCount + 1
                                     end
 
-                                    if myFaction == "Alliance" and factionId == 1 then
+                                    if enemyFactionId ~= nil and factionId == enemyFactionId then
                                         visibleEnemy = visibleEnemy + 1
-                                    elseif myFaction == "Horde" and factionId == 0 then
-                                        visibleEnemy = visibleEnemy + 1
+
+                                        local damage = s.damageDone or s.damage or 0
+                                        local healing = s.healingDone or s.healing or 0
+                                        local killingBlows = s.killingBlows or s.kills or 0
+                                        local honorableKills = s.honorableKills or s.honorKills or 0
+                                        local deaths = s.deaths or 0
+                                        local objectives = s.objectives or s.objectiveScore or 0
+
+                                        if (damage > 0) or (healing > 0) or (killingBlows > 0) or (honorableKills > 0) or (deaths > 0) or (objectives > 0) then
+                                            activeEnemy = activeEnemy + 1
+                                        end
                                     end
                                 end
                             end
 
-                            if visibleEnemy >= allowedThreshold then
+                            Debug(string.format("Enemy visibility check: myFaction=%s, enemyFactionId=%s, visibleEnemy=%d (threshold=%d), activeEnemy=%d (threshold=%d), A=%d, H=%d", tostring(myFaction), tostring(enemyFactionId), visibleEnemy, allowedThreshold, activeEnemy, activeEnemyThreshold, allianceCount, hordeCount))
+
+                            if enemyFactionId ~= nil and visibleEnemy >= allowedThreshold and activeEnemy >= activeEnemyThreshold then
                                 isInProgressBG = true
                                 detectionMethod = string.format("enemy_visible_%d_players", visibleEnemy)
                                 Debug("IN-PROGRESS BG detected via enemy visibility threshold (attempt " .. attempt .. ")")
@@ -4338,19 +4253,30 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             end)
             
             -- Fallback: Set battleHasBegun flag after reasonable delay if no chat message comes
-            C_Timer.After(90, function() -- 1.5 minutes after entering BG
-                if insideBG and not playerTracker.battleHasBegun then
-                    Debug("*** FALLBACK: Setting battleHasBegun flag (no start message received) ***")
-                    playerTracker.battleHasBegun = true
-                    Debug("Battle begun flag set via fallback timer")
-                end
-            end)
+    C_Timer.After(90, function() -- 1.5 minutes after entering BG
+        if insideBG and not playerTracker.battleHasBegun then
+            Debug("*** FALLBACK: Setting battleHasBegun flag (no start message received) ***")
+            playerTracker.battleHasBegun = true
+            Debug("Battle begun flag set via fallback timer")
+
+            -- If we already determined this is an in-progress join, do not capture the initial list
+            if playerTracker.joinedInProgress then
+                Debug("Fallback battle start: joinedInProgress already true, skipping initial capture")
+                return
+            end
+        end
+    end)
             
             -- CONSERVATIVE fallback: Check periodically if match has started (in case events are missed)
             local checkCount = 0
             local function CheckMatchStart()
                 checkCount = checkCount + 1
                 if insideBG and not playerTracker.initialListCaptured and checkCount <= 15 then -- Check for up to 2.5 minutes
+                    if playerTracker.joinedInProgress then
+                        Debug("Periodic match start check: joinedInProgress true, skipping further checks")
+                        return
+                    end
+
                     if IsMatchStarted() then
                         Debug("MATCH START DETECTED via periodic check (attempt " .. checkCount .. ")")
                         CaptureInitialPlayerList(false) -- Use match start validation for fallback
@@ -4359,7 +4285,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     end
                 end
             end
-            
+
             -- Start checking after 30 seconds (longer delay for preparation phase)
             C_Timer.After(25, CheckMatchStart)
             
@@ -4572,16 +4498,12 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         bgStartTime = 0
         matchSaved = false
         saveInProgress = false
-        StopOverflowTracking() -- Stop monitoring overflow
         -- Reset player tracker on BG exit
         playerTracker.initialPlayerList = {}
         playerTracker.finalPlayerList = {}
         playerTracker.initialListCaptured = false
         playerTracker.battleHasBegun = false
         playerTracker.detectedAFKers = {}
-        playerTracker.damageHealing = {}
-        playerTracker.lastCheck = {}
-        playerTracker.overflowDetected = {}
         Debug("BG exit: All flags reset, player tracker cleared")
     end
 end)
@@ -4640,6 +4562,7 @@ function DebugBGTypeDetection()
     print("  C_PvP.IsSoloRBG: " .. (C_PvP and C_PvP.IsSoloRBG and "Available" or "Not Available"))
     print("  C_PvP.IsBattleground: " .. (C_PvP and C_PvP.IsBattleground and "Available" or "Not Available"))
     print("  C_PvP.GetActiveMatchDuration: " .. (C_PvP and C_PvP.GetActiveMatchDuration and "Available" or "Not Available"))
+	print("  IsWargame: " .. (IsWargame and "Available" or "Not Available"))
     print("  IsRatedBattleground: " .. (IsRatedBattleground and "Available" or "Not Available"))
     print("  C_PvP.GetActiveMatchBracket: " .. (C_PvP and C_PvP.GetActiveMatchBracket and "Available" or "Not Available"))
     
@@ -4664,6 +4587,11 @@ function DebugBGTypeDetection()
         print("C_PvP.GetActiveMatchDuration(): " .. tostring(duration) .. " seconds")
     end
     
+	if IsWargame then
+		local isWG = IsWargame()
+		print("IsWargame(): " .. tostring(isWG))
+	end
+	
     if IsRatedBattleground then
         local isRated = IsRatedBattleground()
         print("IsRatedBattleground(): " .. tostring(isRated))
@@ -4713,7 +4641,10 @@ function DebugBGTypeDetection()
             -- Simulate the detection logic
             local detectedType = "non-rated"
             
-            if C_PvP and C_PvP.IsInBrawl and C_PvP.IsInBrawl() then
+			if IsWargame and IsWargame() then
+				detectedType = "wargames"
+				print("DETECTION: Wargame")
+			elseif C_PvP and C_PvP.IsInBrawl and C_PvP.IsInBrawl() then
                 detectedType = "brawl"
                 print("DETECTION: Brawl")
             elseif C_PvP and C_PvP.IsSoloRBG and C_PvP.IsSoloRBG() then
@@ -4982,136 +4913,7 @@ function DebugInProgressDetection()
     print("=====================================")
 end
 
--- Debug function to check overflow tracking status
-function DebugOverflowStatus()
-    print("=== OVERFLOW TRACKING DEBUG ===")
-    print("Inside BG: " .. tostring(insideBG))
-    print("Overflow timer running: " .. tostring(overflowTrackingTimer ~= nil))
-    
-    if not insideBG then
-        print("Not in battleground - overflow tracking should be stopped")
-        print("===============================")
-        return
-    end
-    
-    local trackedPlayers = tCount(playerTracker.lastCheck)
-    print("Players being tracked: " .. trackedPlayers)
-    
-    if trackedPlayers == 0 then
-        print("*** WARNING: No players being tracked for overflow! ***")
-        print("This could indicate TrackPlayerStats() isn't running properly")
-    end
-    
-    -- Show current player's tracking data
-    local playerName = UnitName("player")
-    local playerRealm = GetRealmName() or "Unknown-Realm"
-    local playerKey = GetPlayerKey(playerName, playerRealm)
-    
-    print("")
-    print("YOUR TRACKING DATA:")
-    print("Player key: " .. playerKey)
-    
-    local yourLastCheck = playerTracker.lastCheck[playerKey]
-    local yourOverflows = playerTracker.overflowDetected[playerKey]
-    
-    if yourLastCheck then
-        print("Last recorded damage: " .. yourLastCheck.damage)
-        print("Last recorded healing: " .. yourLastCheck.healing)
-        print("Last check timestamp: " .. yourLastCheck.timestamp .. " (current: " .. GetTime() .. ")")
-        print("Time since last check: " .. math.floor(GetTime() - yourLastCheck.timestamp) .. " seconds")
-    else
-        print("*** NO TRACKING DATA FOR YOU! ***")
-        print("This means TrackPlayerStats() hasn't seen you yet")
-    end
-    
-    if yourOverflows then
-        print("Detected damage overflows: " .. yourOverflows.damageOverflows)
-        print("Detected healing overflows: " .. yourOverflows.healingOverflows)
-        
-        if yourOverflows.healingOverflows > 0 then
-            print("*** HEALING OVERFLOW DETECTED! ***")
-        end
-    else
-        print("No overflow data initialized for you")
-    end
-    
-    -- Get current scoreboard data to compare
-    local rows = GetNumBattlefieldScores()
-    if rows > 0 then
-        for i = 1, rows do
-            local success, s = pcall(C_PvP.GetScoreInfo, i)
-            if success and s and s.name then
-                local name, realm = s.name, ""
-                if s.name:find("-") then
-                    name, realm = s.name:match("^(.+)-(.+)$")
-                else
-                    realm = GetRealmName() or "Unknown-Realm"
-                end
-                
-                local key = GetPlayerKey(name, realm)
-                if key == playerKey then
-                    local currentDamage = s.damageDone or s.damage or 0
-                    local currentHealing = s.healingDone or s.healing or 0
-                    
-                    print("")
-                    print("CURRENT SCOREBOARD VALUES:")
-                    print("Current damage: " .. currentDamage)
-                    print("Current healing: " .. currentHealing)
-                    
-                    if yourLastCheck then
-                        print("Change since last check:")
-                        print("  Damage: " .. (currentDamage - yourLastCheck.damage))
-                        print("  Healing: " .. (currentHealing - yourLastCheck.healing))
-                        
-                        -- Check if this looks like an overflow
-                        if currentHealing < yourLastCheck.healing and yourLastCheck.healing > OVERFLOW_DETECTION_THRESHOLD then
-                            print("*** POTENTIAL OVERFLOW DETECTED NOW! ***")
-                            print("Previous healing (" .. yourLastCheck.healing .. ") was above threshold")
-                            print("Current healing (" .. currentHealing .. ") is lower")
-                        end
-                    end
-                    break
-                end
-            end
-        end
-    end
-    
-    print("===============================")
-end
-
--- Function to manually run overflow detection right now
-function ForceOverflowCheck()
-    if not insideBG then
-        print("Not in a battleground")
-        return
-    end
-    
-    print("=== FORCING OVERFLOW CHECK ===")
-    print("Running TrackPlayerStats() manually...")
-    
-    TrackPlayerStats()
-    
-    print("Check complete. Run DebugOverflowStatus() to see results.")
-    print("==============================")
-end
-
--- Enhanced overflow tracking with more frequent checks and better logging
-function StartEnhancedOverflowTracking()
-    if overflowTrackingTimer then
-        overflowTrackingTimer:Cancel()
-        Debug("Stopped existing overflow tracking")
-    end
-    
-    Debug("Starting ENHANCED overflow tracking (every 5 seconds)")
-    overflowTrackingTimer = C_Timer.NewTicker(5, function() -- Check every 5 seconds instead of 15
-        if insideBG then
-            TrackPlayerStats()
-        else
-            -- Auto-stop if we leave BG
-            StopOverflowTracking()
-        end
-    end)
-end
+-- (overflow debug functions removed)
 
 -- Test objective data collection on saved battlegrounds
 function TestObjectiveCollection()
@@ -5173,136 +4975,7 @@ function TestObjectiveCollection()
     print("================================================")
 end
 
--- Debug function to check overflow tracking status
-function DebugOverflowStatus()
-    print("=== OVERFLOW TRACKING DEBUG ===")
-    print("Inside BG: " .. tostring(insideBG))
-    print("Overflow timer running: " .. tostring(overflowTrackingTimer ~= nil))
-    
-    if not insideBG then
-        print("Not in battleground - overflow tracking should be stopped")
-        print("===============================")
-        return
-    end
-    
-    local trackedPlayers = tCount(playerTracker.lastCheck)
-    print("Players being tracked: " .. trackedPlayers)
-    
-    if trackedPlayers == 0 then
-        print("*** WARNING: No players being tracked for overflow! ***")
-        print("This could indicate TrackPlayerStats() isn't running properly")
-    end
-    
-    -- Show current player's tracking data
-    local playerName = UnitName("player")
-    local playerRealm = GetRealmName() or "Unknown-Realm"
-    local playerKey = GetPlayerKey(playerName, playerRealm)
-    
-    print("")
-    print("YOUR TRACKING DATA:")
-    print("Player key: " .. playerKey)
-    
-    local yourLastCheck = playerTracker.lastCheck[playerKey]
-    local yourOverflows = playerTracker.overflowDetected[playerKey]
-    
-    if yourLastCheck then
-        print("Last recorded damage: " .. yourLastCheck.damage)
-        print("Last recorded healing: " .. yourLastCheck.healing)
-        print("Last check timestamp: " .. yourLastCheck.timestamp .. " (current: " .. GetTime() .. ")")
-        print("Time since last check: " .. math.floor(GetTime() - yourLastCheck.timestamp) .. " seconds")
-    else
-        print("*** NO TRACKING DATA FOR YOU! ***")
-        print("This means TrackPlayerStats() hasn't seen you yet")
-    end
-    
-    if yourOverflows then
-        print("Detected damage overflows: " .. yourOverflows.damageOverflows)
-        print("Detected healing overflows: " .. yourOverflows.healingOverflows)
-        
-        if yourOverflows.healingOverflows > 0 then
-            print("*** HEALING OVERFLOW DETECTED! ***")
-        end
-    else
-        print("No overflow data initialized for you")
-    end
-    
-    -- Get current scoreboard data to compare
-    local rows = GetNumBattlefieldScores()
-    if rows > 0 then
-        for i = 1, rows do
-            local success, s = pcall(C_PvP.GetScoreInfo, i)
-            if success and s and s.name then
-                local name, realm = s.name, ""
-                if s.name:find("-") then
-                    name, realm = s.name:match("^(.+)-(.+)$")
-                else
-                    realm = GetRealmName() or "Unknown-Realm"
-                end
-                
-                local key = GetPlayerKey(name, realm)
-                if key == playerKey then
-                    local currentDamage = s.damageDone or s.damage or 0
-                    local currentHealing = s.healingDone or s.healing or 0
-                    
-                    print("")
-                    print("CURRENT SCOREBOARD VALUES:")
-                    print("Current damage: " .. currentDamage)
-                    print("Current healing: " .. currentHealing)
-                    
-                    if yourLastCheck then
-                        print("Change since last check:")
-                        print("  Damage: " .. (currentDamage - yourLastCheck.damage))
-                        print("  Healing: " .. (currentHealing - yourLastCheck.healing))
-                        
-                        -- Check if this looks like an overflow
-                        if currentHealing < yourLastCheck.healing and yourLastCheck.healing > OVERFLOW_DETECTION_THRESHOLD then
-                            print("*** POTENTIAL OVERFLOW DETECTED NOW! ***")
-                            print("Previous healing (" .. yourLastCheck.healing .. ") was above threshold")
-                            print("Current healing (" .. currentHealing .. ") is lower")
-                        end
-                    end
-                    break
-                end
-            end
-        end
-    end
-    
-    print("===============================")
-end
-
--- Function to manually run overflow detection right now
-function ForceOverflowCheck()
-    if not insideBG then
-        print("Not in a battleground")
-        return
-    end
-    
-    print("=== FORCING OVERFLOW CHECK ===")
-    print("Running TrackPlayerStats() manually...")
-    
-    TrackPlayerStats()
-    
-    print("Check complete. Run DebugOverflowStatus() to see results.")
-    print("==============================")
-end
-
--- Enhanced overflow tracking with more frequent checks and better logging
-function StartEnhancedOverflowTracking()
-    if overflowTrackingTimer then
-        overflowTrackingTimer:Cancel()
-        Debug("Stopped existing overflow tracking")
-    end
-    
-    Debug("Starting ENHANCED overflow tracking (every 5 seconds)")
-    overflowTrackingTimer = C_Timer.NewTicker(5, function() -- Check every 5 seconds instead of 15
-        if insideBG then
-            TrackPlayerStats()
-        else
-            -- Auto-stop if we leave BG
-            StopOverflowTracking()
-        end
-    end)
-end
+-- (overflow debug functions removed)
 
 -- Debug function to examine the stats table from GetScoreInfo
 function DebugPVPStatInfo()
