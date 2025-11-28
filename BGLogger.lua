@@ -3898,11 +3898,6 @@ local function CreateWindow()
     f:SetScript("OnKeyDown", function(self, key)
         if key == "ESCAPE" then
             self:Hide()
-            -- Stop the key from propagating further
-            self:SetPropagateKeyboardInput(false)
-        else
-            -- Let other keys propagate normally
-            self:SetPropagateKeyboardInput(true)
         end
     end)
     
