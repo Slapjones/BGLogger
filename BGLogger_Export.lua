@@ -164,35 +164,26 @@ function ShowJSONExportFrame(jsonString, filename)
 	D("JSON export frame shown with read-only " .. #jsonString .. " characters")
 end
 
--- Export a single battleground record by key
-function ExportBattleground(key)
-	D("ExportBattleground called for key: " .. tostring(key))
-	
+local function BuildExportObject(key)
 	if not key or key == "" then
-		print("|cff00ffffBGLogger:|r No battleground selected for export")
-		return
-	end
-	
-	local data = BGLoggerDB[key]
-	if not data then
-		print("|cff00ffffBGLogger:|r Battleground data not found")
-		return
+		return nil, nil, "No battleground selected for export"
 	end
 
-	-- Check integrity data (unless test exports are allowed in debug mode)
+	local data = BGLoggerDB[key]
+	if not data then
+		return nil, nil, "Battleground data not found"
+	end
+
 	if not data.integrity and not ALLOW_TEST_EXPORTS then
-		print("|cff00ffffBGLogger:|r Warning: This battleground was saved without integrity data and cannot be exported safely.")
-		print("|cff00ffffBGLogger:|r Only battlegrounds saved with the updated addon can be uploaded to prevent data tampering.")
-		return
+		return nil, nil, "This battleground was saved without integrity data and cannot be exported safely."
 	end
 
 	local mapName = data.battlegroundName or "Unknown Battleground"
-	
+
 	-- Convert players
 	local exportPlayers = {}
 	local afkersList = {}
 	for _, player in ipairs(data.stats or {}) do
-		-- Objective data collected elsewhere but exported here
 		local objectiveData = {
 			total = player.objectives or 0,
 			breakdown = player.objectiveBreakdown or {}
@@ -212,10 +203,8 @@ function ExportBattleground(key)
 			objectiveBreakdown = objectiveData.breakdown,
 			isBackfill = player.isBackfill or false
 		})
-		-- Note: AFKers generally won't be present in final stats; we read them from data.afkerList below
 	end
 
-	-- Include AFKers from saved list (players present at start but not on final scoreboard)
 	if data.afkerList and type(data.afkerList) == "table" then
 		for _, afker in ipairs(data.afkerList) do
 			table.insert(afkersList, {
@@ -227,7 +216,6 @@ function ExportBattleground(key)
 		end
 	end
 
-	-- Convert to website-compatible JSON format
 	local exportData = {
 		battleground = mapName,
 		date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -242,7 +230,6 @@ function ExportBattleground(key)
 		validForStats = data.validForStats or false
 	}
 
-	-- Always compute v2 at export to ensure correct format and parity
 	exportData.integrity = exportData.integrity or {}
 	local forHashV2 = {
 		battleground = exportData.battleground,
@@ -260,8 +247,24 @@ function ExportBattleground(key)
 	exportData.integrity.hash = v2Hash
 	exportData.integrity.version = "BGLogger_v2.0"
 	exportData.integrity.metadata = { algorithm = "deep_v2", playerCount = #exportPlayers }
+
+	return exportData, mapName
+end
+
+-- Export a single battleground record by key
+function ExportBattleground(key)
+	D("ExportBattleground called for key: " .. tostring(key))
+	
+	local exportData, mapName, err = BuildExportObject(key)
+	if not exportData then
+		if err then
+			print("|cff00ffffBGLogger:|r " .. err)
+		end
+		return
+	end
+
 	D("Export using integrity hash (v2): " .. (exportData.integrity and exportData.integrity.hash or "missing"))
-	D("Export includes " .. #exportPlayers .. " total players, " .. #afkersList .. " AFKers")
+	D("Export includes " .. #(exportData.players or {}) .. " total players, " .. #(exportData.afkers or {}) .. " AFKers")
 
 	-- Generate JSON string
 	local success, jsonString = pcall(TableToJSON, exportData)
@@ -286,6 +289,40 @@ function ExportBattleground(key)
 
 	ShowJSONExportFrame(jsonString, filename)
 	print("|cff00ffffBGLogger:|r Exported " .. mapName .. " with verified integrity hash")
+end
+
+function ExportSelectedBattlegrounds(keys)
+	if not keys or #keys == 0 then
+		print("|cff00ffffBGLogger:|r Select at least one battleground from the main list first.")
+		return
+	end
+
+	local exports = {}
+	local successCount = 0
+	for _, key in ipairs(keys) do
+		local exportData, _, err = BuildExportObject(key)
+		if exportData then
+			table.insert(exports, exportData)
+			successCount = successCount + 1
+		elseif err then
+			print("|cff00ffffBGLogger:|r Skipping " .. tostring(key) .. ": " .. err)
+		end
+	end
+
+	if successCount == 0 then
+		print("|cff00ffffBGLogger:|r No valid battlegrounds available for export.")
+		return
+	end
+
+	local success, jsonString = pcall(TableToJSON, exports)
+	if not success then
+		print("|cff00ffffBGLogger:|r Error generating JSON: " .. tostring(jsonString))
+		return
+	end
+
+	local filename = string.format("BGLogger_Selected_%s.json", date("!%Y%m%d_%H%M%S"))
+	ShowJSONExportFrame(jsonString, filename)
+	print("|cff00ffffBGLogger:|r Exported " .. successCount .. " battlegrounds in a single multi-log export.")
 end
 
 -- Export all battlegrounds as a single concatenated JSON array (copy/paste)

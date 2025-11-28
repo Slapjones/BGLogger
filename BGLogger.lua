@@ -6,6 +6,7 @@ BGLoggerDB = BGLoggerDB or {}
 -- Config / globals
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
+local selectedLogs = {}
 local LINE_HEIGHT            = 20
 local ROW_PADDING_Y          = 2
 local WIN_W, WIN_H           = 1380, 820
@@ -18,6 +19,12 @@ local DEBUG_MODE             = false -- Set to false for production, true for de
 local saveInProgress         = false
 local ALLOW_TEST_EXPORTS     = DEBUG_MODE
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
+
+-- Overflow protection (32-bit wrap) constants for current retail and expansion
+-- We use a conservative threshold of 3,000,000,000 to detect nearing the 32-bit unsigned wrap.
+-- If a stat crosses this threshold and later is observed below it, we assume a wrap occurred.
+local OVERFLOW_THRESHOLD      = 3000000000      -- 3,000,000,000
+local OVERFLOW_CORRECTION     = 4294967295      -- 2^32 - 1, amount added after wrap
 
 -- Safe wrappers for scoreboard APIs (Midnight compatibility)
 local GetNumBattlefieldScores = _G.GetNumBattlefieldScores
@@ -48,6 +55,16 @@ end
 -- Persisted per-battleground mapping of PVPStatID -> objective type
 BGLoggerDB.__ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap or {}
 local ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap
+
+---------------------------------------------------------------------
+-- Overflow Protection State (per match)
+---------------------------------------------------------------------
+-- Track players that have potentially overflowed (>= threshold at any point)
+local potentialOverflow = {}   -- [playerKey] = { damage = true/false, healing = true/false }
+-- Track players that are confirmed to have overflowed (observed dropping below threshold after being potential)
+local confirmedOverflow = {}   -- [playerKey] = { damage = true/false, healing = true/false }
+-- Poll timer
+local overflowPollTimer = nil
 
 ---------------------------------------------------------------------
 -- Simple Player List Tracking
@@ -122,6 +139,9 @@ local function ResetPlayerTracker()
         -- In-progress BG tracking flags
         playerTracker.joinedInProgress = false
         playerTracker.playerJoinedInProgress = false
+		-- Reset overflow protection state
+		potentialOverflow = {}
+		confirmedOverflow = {}
         Debug("Player tracker reset for new battleground")
     else
         Debug("Skipping tracker reset - still in active battleground")
@@ -194,6 +214,115 @@ end
 ---------------------------------------------------------------------
 -- Objective Data Collection Functions
 ---------------------------------------------------------------------
+
+---------------------------------------------------------------------
+-- Overflow Protection Helpers
+---------------------------------------------------------------------
+-- Mark a player as potential overflow for the given statType ('damage'|'healing')
+local function MarkPotentialOverflow(playerKey, statType)
+	if not playerKey or not statType then return end
+	potentialOverflow[playerKey] = potentialOverflow[playerKey] or { damage = false, healing = false }
+	if not potentialOverflow[playerKey][statType] then
+		potentialOverflow[playerKey][statType] = true
+		Debug("Overflow protection: POTENTIAL " .. statType .. " overflow for " .. tostring(playerKey))
+	end
+end
+
+-- If a player was potential overflow and the stat drops below threshold, confirm overflow for that stat
+local function CheckConfirmedOverflow(playerKey, statType, currentValue)
+	if not playerKey or not statType then return end
+	if not potentialOverflow[playerKey] or not potentialOverflow[playerKey][statType] then
+		return -- Not yet a potential overflow, nothing to confirm
+	end
+	confirmedOverflow[playerKey] = confirmedOverflow[playerKey] or { damage = false, healing = false }
+	if not confirmedOverflow[playerKey][statType] and currentValue < OVERFLOW_THRESHOLD then
+		confirmedOverflow[playerKey][statType] = true
+		Debug("Overflow protection: CONFIRMED " .. statType .. " overflow for " .. tostring(playerKey))
+	end
+end
+
+-- Poll the scoreboard every 15 seconds to track potential/confirmed overflows
+local function TrackOverflowCandidates()
+	if not insideBG or matchSaved then return end
+	local rows = GetNumBattlefieldScores()
+	if rows == 0 then return end
+	for i = 1, rows do
+		local success, s = pcall(C_PvP.GetScoreInfo, i)
+		if success and s and s.name then
+			-- Derive stable player key (reuse existing normalization used during save)
+			local playerName, realmName = s.name, ""
+			if s.name:find("-") then
+				playerName, realmName = s.name:match("^(.+)-(.+)$")
+			end
+			if (not realmName or realmName == "") and s.realm then
+				realmName = s.realm
+			end
+			if (not realmName or realmName == "") and s.guid then
+				local _, _, _, _, _, _, _, realmFromGUID = GetPlayerInfoByGUID(s.guid)
+				if realmFromGUID and realmFromGUID ~= "" then
+					realmName = realmFromGUID
+				end
+			end
+			if not realmName or realmName == "" then
+				realmName = GetRealmName() or "Unknown-Realm"
+			end
+			realmName = realmName:gsub("%s+", ""):gsub("'", "")
+			local playerKey = GetPlayerKey(playerName, realmName)
+
+			local currentDamage = s.damageDone or s.damage or 0
+			local currentHealing = s.healingDone or s.healing or 0
+
+			-- Mark potential overflow when crossing threshold
+			if currentDamage >= OVERFLOW_THRESHOLD then
+				MarkPotentialOverflow(playerKey, "damage")
+			end
+			if currentHealing >= OVERFLOW_THRESHOLD then
+				MarkPotentialOverflow(playerKey, "healing")
+			end
+
+			-- Confirm overflow if we were potential and now dropped below threshold
+			CheckConfirmedOverflow(playerKey, "damage", currentDamage)
+			CheckConfirmedOverflow(playerKey, "healing", currentHealing)
+		end
+	end
+end
+
+-- Start/Stop 15s polling while match is active
+local function StartOverflowProtection()
+	if overflowPollTimer then return end
+	Debug("Overflow protection: starting 15s scoreboard polling")
+	overflowPollTimer = C_Timer.NewTicker(15, function()
+		if not insideBG or matchSaved then
+			return
+		end
+		TrackOverflowCandidates()
+	end)
+end
+
+local function StopOverflowProtection()
+	if overflowPollTimer then
+		overflowPollTimer:Cancel()
+		overflowPollTimer = nil
+		Debug("Overflow protection: polling stopped")
+	end
+end
+
+-- Apply correction to final values if confirmed overflow was detected during match
+local function ApplyOverflowCorrections(playerKey, damage, healing)
+	local correctedDamage = damage or 0
+	local correctedHealing = healing or 0
+	local state = confirmedOverflow[playerKey]
+	if state then
+		if state.damage then
+			correctedDamage = correctedDamage + OVERFLOW_CORRECTION
+		end
+		if state.healing then
+			correctedHealing = correctedHealing + OVERFLOW_CORRECTION
+		end
+	end
+	return correctedDamage, correctedHealing
+end
+
 
 
 
@@ -1867,7 +1996,8 @@ local function NormalizeBattlegroundName(mapName)
         ["Ashran"] = "Ashran",
         ["Wintergrasp"] = "Battle for Wintergrasp", 
         ["Tol Barad"] = "Tol Barad",
-        ["The Battle for Gilneas"] = "Battle for Gilneas",
+	["The Battle for Gilneas"] = "The Battle for Gilneas",
+	["Battle for Gilneas"] = "The Battle for Gilneas",
         ["Silvershard Mines"] = "Silvershard Mines",
         ["Temple of Kotmogu"] = "Temple of Kotmogu",
         ["Deepwind Gorge"] = "Deepwind Gorge",
@@ -1989,6 +2119,10 @@ local function CollectScoreData(attemptNumber)
             local rawDamage = s.damageDone or s.damage or 0
             local rawHealing = s.healingDone or s.healing or 0
             
+			-- Apply overflow corrections based on confirmed overflow tracking
+			local playerKeyForCorrection = GetPlayerKey(playerName, realmName)
+			local correctedDamage, correctedHealing = ApplyOverflowCorrections(playerKeyForCorrection, rawDamage, rawHealing)
+			
             -- Extract objective data
             local map = C_Map.GetBestMapForUnit("player") or 0
             local mapInfo = C_Map.GetMapInfo(map)
@@ -2002,8 +2136,8 @@ local function CollectScoreData(attemptNumber)
                 faction = factionName,
                 class = className,
                 spec = specName,
-				damage = rawDamage,
-				healing = rawHealing,
+				damage = correctedDamage,
+				healing = correctedHealing,
                 kills = s.killingBlows or s.kills or 0,
                 deaths = s.deaths or 0,
                 honorableKills = s.honorableKills or s.honorKills or 0,
@@ -2996,20 +3130,190 @@ local function MakeDetailLine(parent, i)
 end
 
 local function MakeListButton(parent, i)
-    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    b:SetHeight(LINE_HEIGHT*2)  -- Make buttons bigger for easier clicking
-    b:SetPoint("TOPLEFT", 0, -(i-1)*(LINE_HEIGHT*2 + 2))  -- Add spacing between buttons
-    b:SetPoint("RIGHT", parent, "RIGHT", -30, 0)  -- More padding for wider window
-    b:SetText("Loading...")  -- Default text
-    b.bg = b:CreateTexture(nil, "BACKGROUND")
-    b.bg:SetAllPoints()
-    b.bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)  -- Dark semi-transparent background
-    
-    -- Add highlight texture
-    b:SetHighlightTexture("Interface\\Buttons\\UI-Panel-Button-Highlight", "ADD")
-    
-    ListButtons[i] = b
-    return b
+	local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+	b:SetHeight(LINE_HEIGHT*2)  -- Make buttons bigger for easier clicking
+	b:SetPoint("TOPLEFT", 0, -(i-1)*(LINE_HEIGHT*2 + 2))  -- Add spacing between buttons
+	b:SetPoint("RIGHT", parent, "RIGHT", -10, 0)  -- More padding for wider window
+	b:SetText("")
+	b.bg = b:CreateTexture(nil, "BACKGROUND")
+	b.bg:SetAllPoints()
+	b.bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)  -- Dark semi-transparent background
+	
+	-- Add highlight texture
+	b:SetHighlightTexture("Interface\\Buttons\\UI-Panel-Button-Highlight", "ADD")
+
+	-- Checkbox for multi-select
+	local checkbox = CreateFrame("CheckButton", nil, b, "UICheckButtonTemplate")
+	checkbox:SetPoint("LEFT", 6, 0)
+	checkbox:SetSize(20, 20)
+	checkbox:SetScript("OnClick", function(self)
+		local key = self:GetParent().bgKey
+		if key then
+			SetLogSelected(key, self:GetChecked())
+			RefreshListSelectionVisuals()
+			UpdateSelectionToolbar()
+		end
+		PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+	end)
+	b.checkbox = checkbox
+
+	-- Custom label so we can control alignment (make space for checkbox)
+	local label = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	label:SetPoint("TOPLEFT", 28, -2)
+	label:SetPoint("BOTTOMRIGHT", -8, 2)
+	label:SetJustifyH("LEFT")
+	label:SetJustifyV("MIDDLE")
+	label:SetTextColor(1, 1, 1)
+	label:SetText("Loading...")
+	b.label = label
+	
+	ListButtons[i] = b
+	return b
+end
+
+---------------------------------------------------------------------
+-- List Selection Helpers
+---------------------------------------------------------------------
+local function IsLogSelected(key)
+	return key and selectedLogs[key] == true
+end
+
+local function SetLogSelected(key, isSelected)
+	if not key then return end
+	if isSelected then
+		selectedLogs[key] = true
+	else
+		selectedLogs[key] = nil
+	end
+end
+
+local function ClearAllSelections()
+	wipe(selectedLogs)
+end
+
+local function GetSelectedCount()
+	local count = 0
+	for _ in pairs(selectedLogs) do
+		count = count + 1
+	end
+	return count
+end
+
+local function PruneInvalidSelections(entries)
+	if not entries then return end
+	local valid = {}
+	for _, entry in ipairs(entries) do
+		valid[entry.key] = true
+	end
+	for key in pairs(selectedLogs) do
+		if not valid[key] then
+			selectedLogs[key] = nil
+		end
+	end
+end
+
+local function AreAllEntriesSelected(entries)
+	if not entries or #entries == 0 then return false end
+	for _, entry in ipairs(entries) do
+		if not selectedLogs[entry.key] then
+			return false
+		end
+	end
+	return true
+end
+
+local function RefreshListSelectionVisuals()
+	for _, btn in ipairs(ListButtons) do
+		if btn:IsShown() and btn.bgKey then
+			local isSelected = IsLogSelected(btn.bgKey)
+			if btn.checkbox then
+				btn.checkbox:SetChecked(isSelected)
+			end
+			if btn.bg then
+				if isSelected then
+					btn.bg:SetColorTexture(0.13, 0.35, 0.18, 0.85)
+				else
+					btn.bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)
+				end
+			end
+		end
+	end
+end
+
+local function GetSelectedKeysInOrder()
+	local ordered = {}
+	if WINDOW and WINDOW.currentEntries then
+		for _, entry in ipairs(WINDOW.currentEntries) do
+			if selectedLogs[entry.key] then
+				table.insert(ordered, entry.key)
+			end
+		end
+	else
+		for key in pairs(selectedLogs) do
+			table.insert(ordered, key)
+		end
+		table.sort(ordered)
+	end
+	return ordered
+end
+
+local function UpdateSelectionToolbar()
+	if not WINDOW then return end
+	local count = GetSelectedCount()
+	if WINDOW.exportSelectedBtn then
+		if WINDOW.currentView == "list" then
+			WINDOW.exportSelectedBtn:Show()
+			WINDOW.exportSelectedBtn:SetEnabled(count > 0)
+		else
+			WINDOW.exportSelectedBtn:Hide()
+		end
+	end
+	if WINDOW.selectAllBtn then
+		if WINDOW.currentView == "list" then
+			WINDOW.selectAllBtn:Show()
+			local showClear = WINDOW.currentEntries and AreAllEntriesSelected(WINDOW.currentEntries) and #WINDOW.currentEntries > 0
+			WINDOW.selectAllBtn:SetText(showClear and "Clear All" or "Select All")
+		else
+			WINDOW.selectAllBtn:Hide()
+		end
+	end
+	if WINDOW.selectionStatusText then
+		if WINDOW.currentView == "list" then
+			WINDOW.selectionStatusText:Show()
+			WINDOW.selectionStatusText:SetText("Selected: " .. count)
+		else
+			WINDOW.selectionStatusText:Hide()
+		end
+	end
+end
+
+local function ToggleSelectAllEntries()
+	if not WINDOW or WINDOW.currentView ~= "list" then return end
+	local entries = WINDOW.currentEntries or {}
+	if #entries == 0 then return end
+	local shouldSelectAll = not AreAllEntriesSelected(entries)
+	for _, entry in ipairs(entries) do
+		SetLogSelected(entry.key, shouldSelectAll)
+	end
+	RefreshListSelectionVisuals()
+	UpdateSelectionToolbar()
+end
+
+local function ExportSelectedFromList()
+	if WINDOW and WINDOW.currentView ~= "list" then
+		print("|cff00ffffBGLogger:|r Please return to the list view to export multiple logs.")
+		return
+	end
+	local keys = GetSelectedKeysInOrder()
+	if #keys == 0 then
+		print("|cff00ffffBGLogger:|r Select at least one battleground from the list first.")
+		return
+	end
+	if ExportSelectedBattlegrounds then
+		ExportSelectedBattlegrounds(keys)
+	else
+		print("|cff00ffffBGLogger:|r ExportSelectedBattlegrounds is not available.")
+	end
 end
 
 ---------------------------------------------------------------------
@@ -3038,7 +3342,9 @@ function ShowList()
     WINDOW.detailScroll:Hide()
     WINDOW.backBtn:Hide()
     WINDOW.listScroll:Show()
-    if WINDOW.exportBtn then WINDOW.exportBtn:Hide() end
+	WINDOW.currentEntries = nil
+	if WINDOW.exportBtn then WINDOW.exportBtn:Hide() end
+	UpdateSelectionToolbar()
     
     -- Clear existing buttons first
     for _, btn in ipairs(ListButtons) do
@@ -3058,7 +3364,7 @@ function ShowList()
     end
     
     -- Sort by actual date/time, newest first
-    table.sort(entries, function(a, b)
+	table.sort(entries, function(a, b)
         -- First try to use the ISO date if available (most accurate)
         if a.data.dateISO and b.data.dateISO then
             return a.data.dateISO > b.data.dateISO
@@ -3073,7 +3379,9 @@ function ShowList()
         return a.key > b.key
     end)
     
-    Debug("Sorted " .. #entries .. " battleground entries chronologically")
+	Debug("Sorted " .. #entries .. " battleground entries chronologically")
+	WINDOW.currentEntries = entries
+	PruneInvalidSelections(entries)
     
     -- Create buttons for each entry
     for i, entry in ipairs(entries) do
@@ -3112,15 +3420,35 @@ function ShowList()
             winnerText = " - " .. data.winner .. " Won"
         end
         
-        -- Set enhanced button text
-        btn:SetText(string.format("%s%s%s\n%s", mapName, durationText, winnerText, dateDisplay))
+		-- Set enhanced button text (label)
+		local displayText = string.format("%s%s%s\n%s", mapName, durationText, winnerText, dateDisplay)
+		if btn.label then
+			btn.label:SetText(displayText)
+		else
+			btn:SetText(displayText)
+		end
         btn.bgKey = k  -- Store the key on the button
         
         -- Set click handler
-        btn:SetScript("OnClick", function(self) 
-            Debug("Clicked button for " .. self.bgKey)
-            ShowDetail(self.bgKey) 
+		btn:SetScript("OnClick", function(self, button) 
+			if button == "LeftButton" and IsShiftKeyDown() and self.bgKey then
+				SetLogSelected(self.bgKey, not IsLogSelected(self.bgKey))
+				RefreshListSelectionVisuals()
+				UpdateSelectionToolbar()
+				return
+			end
+			Debug("Clicked button for " .. tostring(self.bgKey))
+			ShowDetail(self.bgKey) 
         end)
+		local isSelected = IsLogSelected(k)
+		if btn.checkbox then
+			btn.checkbox:SetChecked(isSelected)
+		end
+		if isSelected then
+			btn.bg:SetColorTexture(0.13, 0.35, 0.18, 0.85)
+		else
+			btn.bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)
+		end
         
         btn:Show()
     end
@@ -3134,6 +3462,8 @@ function ShowList()
     local contentHeight = #entries * (LINE_HEIGHT*2 + 2)
     WINDOW.listContent:SetHeight(math.max(contentHeight, 10))
     Debug("List view rendered with " .. #entries .. " buttons in chronological order")
+	RefreshListSelectionVisuals()
+	UpdateSelectionToolbar()
 end
 
 -- Redesigned detail view
@@ -3143,6 +3473,7 @@ function ShowDetail(key)
     -- Store current view state
     WINDOW.currentView = "detail"
     WINDOW.currentKey = key
+	UpdateSelectionToolbar()
     
     -- Hide list view, show detail view
     WINDOW.listScroll:Hide()
@@ -3601,6 +3932,7 @@ local function CreateWindow()
         button2 = NO,
         OnAccept = function() 
             wipe(BGLoggerDB)
+			ClearAllSelections()
             RefreshWindow()
         end,
         timeout = 0,
@@ -3624,6 +3956,21 @@ local function CreateWindow()
     backBtn:SetScript("OnClick", ShowList)
     backBtn:Hide()
     f.backBtn = backBtn
+
+	-- Selection controls (list view)
+	local selectAllBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	selectAllBtn:SetSize(90, 22)
+	selectAllBtn:SetPoint("LEFT", backBtn, "RIGHT", 10, 0)
+	selectAllBtn:SetText("Select All")
+	selectAllBtn:SetScript("OnClick", ToggleSelectAllEntries)
+	selectAllBtn:Hide()
+	f.selectAllBtn = selectAllBtn
+
+	local selectionStatusText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	selectionStatusText:SetPoint("LEFT", selectAllBtn, "RIGHT", 10, 0)
+	selectionStatusText:SetText("Selected: 0")
+	selectionStatusText:Hide()
+	f.selectionStatusText = selectionStatusText
     
     -- Add refresh button
     local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -3645,6 +3992,14 @@ local function CreateWindow()
     end)
     exportBtn:Hide() -- Hidden by default (list view)
     f.exportBtn = exportBtn
+
+	local exportSelectedBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	exportSelectedBtn:SetSize(140, 22)
+	exportSelectedBtn:SetPoint("TOPRIGHT", exportBtn, "TOPLEFT", -10, 0)
+	exportSelectedBtn:SetText("Export Selected")
+	exportSelectedBtn:SetScript("OnClick", ExportSelectedFromList)
+	exportSelectedBtn:Hide()
+	f.exportSelectedBtn = exportSelectedBtn
     
     -- Create list scroll frame
     local listScroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
@@ -4098,7 +4453,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             saveInProgress = false
             ResetPlayerTracker() -- Initialize player tracking
             initialPlayerCount = 0 -- Reset player count tracking
-		-- (overflow tracking removed)
+			-- Start overflow protection polling
+			StartOverflowProtection()
             
             -- CRITICAL: Check if this is an in-progress BG with multiple robust retries
             local function CheckInProgress(attempt)
@@ -4498,6 +4854,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         bgStartTime = 0
         matchSaved = false
         saveInProgress = false
+		-- Stop overflow protection and clear state
+		StopOverflowProtection()
+		potentialOverflow = {}
+		confirmedOverflow = {}
         -- Reset player tracker on BG exit
         playerTracker.initialPlayerList = {}
         playerTracker.finalPlayerList = {}
