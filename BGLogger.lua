@@ -7,6 +7,151 @@ BGLoggerDB = BGLoggerDB or {}
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
 local selectedLogs = {}
+
+---------------------------------------------------------------------
+-- List Selection Helpers
+---------------------------------------------------------------------
+local function IsLogSelected(key)
+	return key and selectedLogs[key] == true
+end
+
+local function SetLogSelected(key, isSelected)
+	if not key then return end
+	if isSelected then
+		selectedLogs[key] = true
+	else
+		selectedLogs[key] = nil
+	end
+end
+
+local function ClearAllSelections()
+	wipe(selectedLogs)
+end
+
+local function GetSelectedCount()
+	local count = 0
+	for _ in pairs(selectedLogs) do
+		count = count + 1
+	end
+	return count
+end
+
+local function PruneInvalidSelections(entries)
+	if not entries then return end
+	local valid = {}
+	for _, entry in ipairs(entries) do
+		valid[entry.key] = true
+	end
+	for key in pairs(selectedLogs) do
+		if not valid[key] then
+			selectedLogs[key] = nil
+		end
+	end
+end
+
+local function AreAllEntriesSelected(entries)
+	if not entries or #entries == 0 then return false end
+	for _, entry in ipairs(entries) do
+		if not selectedLogs[entry.key] then
+			return false
+		end
+	end
+	return true
+end
+
+local function RefreshListSelectionVisuals()
+	for _, btn in ipairs(ListButtons) do
+		if btn:IsShown() and btn.bgKey then
+			local isSelected = IsLogSelected(btn.bgKey)
+			if btn.checkbox then
+				btn.checkbox:SetChecked(isSelected)
+			end
+			if btn.bg then
+				if isSelected then
+					btn.bg:SetColorTexture(0.13, 0.35, 0.18, 0.85)
+				else
+					btn.bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)
+				end
+			end
+		end
+	end
+end
+
+local function GetSelectedKeysInOrder()
+	local ordered = {}
+	if WINDOW and WINDOW.currentEntries then
+		for _, entry in ipairs(WINDOW.currentEntries) do
+			if selectedLogs[entry.key] then
+				table.insert(ordered, entry.key)
+			end
+		end
+	else
+		for key in pairs(selectedLogs) do
+			table.insert(ordered, key)
+		end
+		table.sort(ordered)
+	end
+	return ordered
+end
+
+local function UpdateSelectionToolbar()
+	if not WINDOW then return end
+	local count = GetSelectedCount()
+	if WINDOW.exportSelectedBtn then
+		if WINDOW.currentView == "list" then
+			WINDOW.exportSelectedBtn:Show()
+			WINDOW.exportSelectedBtn:SetEnabled(count > 0)
+		else
+			WINDOW.exportSelectedBtn:Hide()
+		end
+	end
+	if WINDOW.selectAllBtn then
+		if WINDOW.currentView == "list" then
+			WINDOW.selectAllBtn:Show()
+			local showClear = WINDOW.currentEntries and AreAllEntriesSelected(WINDOW.currentEntries) and #WINDOW.currentEntries > 0
+			WINDOW.selectAllBtn:SetText(showClear and "Clear All" or "Select All")
+		else
+			WINDOW.selectAllBtn:Hide()
+		end
+	end
+	if WINDOW.selectionStatusText then
+		if WINDOW.currentView == "list" then
+			WINDOW.selectionStatusText:Show()
+			WINDOW.selectionStatusText:SetText("Selected: " .. count)
+		else
+			WINDOW.selectionStatusText:Hide()
+		end
+	end
+end
+
+local function ToggleSelectAllEntries()
+	if not WINDOW or WINDOW.currentView ~= "list" then return end
+	local entries = WINDOW.currentEntries or {}
+	if #entries == 0 then return end
+	local shouldSelectAll = not AreAllEntriesSelected(entries)
+	for _, entry in ipairs(entries) do
+		SetLogSelected(entry.key, shouldSelectAll)
+	end
+	RefreshListSelectionVisuals()
+	UpdateSelectionToolbar()
+end
+
+local function ExportSelectedFromList()
+	if WINDOW and WINDOW.currentView ~= "list" then
+		print("|cff00ffffBGLogger:|r Please return to the list view to export multiple logs.")
+		return
+	end
+	local keys = GetSelectedKeysInOrder()
+	if #keys == 0 then
+		print("|cff00ffffBGLogger:|r Select at least one battleground from the list first.")
+		return
+	end
+	if ExportSelectedBattlegrounds then
+		ExportSelectedBattlegrounds(keys)
+	else
+		print("|cff00ffffBGLogger:|r ExportSelectedBattlegrounds is not available.")
+	end
+end
 local LINE_HEIGHT            = 20
 local ROW_PADDING_Y          = 2
 local WIN_W, WIN_H           = 1380, 820
@@ -3174,148 +3319,6 @@ end
 ---------------------------------------------------------------------
 -- List Selection Helpers
 ---------------------------------------------------------------------
-local function IsLogSelected(key)
-	return key and selectedLogs[key] == true
-end
-
-local function SetLogSelected(key, isSelected)
-	if not key then return end
-	if isSelected then
-		selectedLogs[key] = true
-	else
-		selectedLogs[key] = nil
-	end
-end
-
-local function ClearAllSelections()
-	wipe(selectedLogs)
-end
-
-local function GetSelectedCount()
-	local count = 0
-	for _ in pairs(selectedLogs) do
-		count = count + 1
-	end
-	return count
-end
-
-local function PruneInvalidSelections(entries)
-	if not entries then return end
-	local valid = {}
-	for _, entry in ipairs(entries) do
-		valid[entry.key] = true
-	end
-	for key in pairs(selectedLogs) do
-		if not valid[key] then
-			selectedLogs[key] = nil
-		end
-	end
-end
-
-local function AreAllEntriesSelected(entries)
-	if not entries or #entries == 0 then return false end
-	for _, entry in ipairs(entries) do
-		if not selectedLogs[entry.key] then
-			return false
-		end
-	end
-	return true
-end
-
-local function RefreshListSelectionVisuals()
-	for _, btn in ipairs(ListButtons) do
-		if btn:IsShown() and btn.bgKey then
-			local isSelected = IsLogSelected(btn.bgKey)
-			if btn.checkbox then
-				btn.checkbox:SetChecked(isSelected)
-			end
-			if btn.bg then
-				if isSelected then
-					btn.bg:SetColorTexture(0.13, 0.35, 0.18, 0.85)
-				else
-					btn.bg:SetColorTexture(0.1, 0.1, 0.1, 0.5)
-				end
-			end
-		end
-	end
-end
-
-local function GetSelectedKeysInOrder()
-	local ordered = {}
-	if WINDOW and WINDOW.currentEntries then
-		for _, entry in ipairs(WINDOW.currentEntries) do
-			if selectedLogs[entry.key] then
-				table.insert(ordered, entry.key)
-			end
-		end
-	else
-		for key in pairs(selectedLogs) do
-			table.insert(ordered, key)
-		end
-		table.sort(ordered)
-	end
-	return ordered
-end
-
-local function UpdateSelectionToolbar()
-	if not WINDOW then return end
-	local count = GetSelectedCount()
-	if WINDOW.exportSelectedBtn then
-		if WINDOW.currentView == "list" then
-			WINDOW.exportSelectedBtn:Show()
-			WINDOW.exportSelectedBtn:SetEnabled(count > 0)
-		else
-			WINDOW.exportSelectedBtn:Hide()
-		end
-	end
-	if WINDOW.selectAllBtn then
-		if WINDOW.currentView == "list" then
-			WINDOW.selectAllBtn:Show()
-			local showClear = WINDOW.currentEntries and AreAllEntriesSelected(WINDOW.currentEntries) and #WINDOW.currentEntries > 0
-			WINDOW.selectAllBtn:SetText(showClear and "Clear All" or "Select All")
-		else
-			WINDOW.selectAllBtn:Hide()
-		end
-	end
-	if WINDOW.selectionStatusText then
-		if WINDOW.currentView == "list" then
-			WINDOW.selectionStatusText:Show()
-			WINDOW.selectionStatusText:SetText("Selected: " .. count)
-		else
-			WINDOW.selectionStatusText:Hide()
-		end
-	end
-end
-
-local function ToggleSelectAllEntries()
-	if not WINDOW or WINDOW.currentView ~= "list" then return end
-	local entries = WINDOW.currentEntries or {}
-	if #entries == 0 then return end
-	local shouldSelectAll = not AreAllEntriesSelected(entries)
-	for _, entry in ipairs(entries) do
-		SetLogSelected(entry.key, shouldSelectAll)
-	end
-	RefreshListSelectionVisuals()
-	UpdateSelectionToolbar()
-end
-
-local function ExportSelectedFromList()
-	if WINDOW and WINDOW.currentView ~= "list" then
-		print("|cff00ffffBGLogger:|r Please return to the list view to export multiple logs.")
-		return
-	end
-	local keys = GetSelectedKeysInOrder()
-	if #keys == 0 then
-		print("|cff00ffffBGLogger:|r Select at least one battleground from the list first.")
-		return
-	end
-	if ExportSelectedBattlegrounds then
-		ExportSelectedBattlegrounds(keys)
-	else
-		print("|cff00ffffBGLogger:|r ExportSelectedBattlegrounds is not available.")
-	end
-end
-
 ---------------------------------------------------------------------
 -- Renderers - completely rebuilt
 ---------------------------------------------------------------------
