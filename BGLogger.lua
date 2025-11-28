@@ -4800,6 +4800,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
+            StopOverflowProtection()
+            ResetPlayerTracker()
             StopStatePersistence()
             ClearSessionState("left battleground")
         elseif not insideBG then
@@ -4808,6 +4810,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
+            StopOverflowProtection()
+            ResetPlayerTracker()
             StopStatePersistence()
             ClearSessionState("world load outside BG")
         end
@@ -5003,25 +5007,16 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         end
         
     
-    elseif (e == "PLAYER_LEAVING_WORLD" or e == "ZONE_CHANGED_NEW_AREA") and insideBG then
-        Debug("Leaving battleground event: " .. e)
-        insideBG = false
-        bgStartTime = 0
-        matchSaved = false
-        saveInProgress = false
-		-- Stop overflow protection and clear state
-		StopOverflowProtection()
-        StopStatePersistence()
-		potentialOverflow = {}
-		confirmedOverflow = {}
-        ClearSessionState("zone change / leaving world")
-        -- Reset player tracker on BG exit
-        playerTracker.initialPlayerList = {}
-        playerTracker.finalPlayerList = {}
-        playerTracker.initialListCaptured = false
-        playerTracker.battleHasBegun = false
-        playerTracker.detectedAFKers = {}
-        Debug("BG exit: All flags reset, player tracker cleared")
+    elseif (e == "PLAYER_LEAVING_WORLD" or e == "ZONE_CHANGED_NEW_AREA") then
+        if insideBG then
+            Debug("Leaving battleground event (" .. e .. ") while still in match - persisting state for reload/transition")
+            PersistMatchState("leaving_world_event")
+            StopOverflowProtection()
+            StopStatePersistence()
+            insideBG = false
+        else
+            Debug("Leaving world/zone (" .. e .. ") while not flagged inside BG - no active match to preserve")
+        end
     end
 end)
 
