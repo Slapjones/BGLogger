@@ -3,7 +3,7 @@
 ## Notes: Record of battleground statistics for export
 ## Author: Slapjones
 ## Version: @project-version@
-## SavedVariables: BGLoggerDB
+## SavedVariables: BGLoggerDB, BGLoggerSession
 ## X-Curse-Project-ID: 1286277
 ## X-Wago-ID: n6VPlLGd
 

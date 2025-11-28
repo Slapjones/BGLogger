@@ -1,12 +1,150 @@
 -- BGLogger: Battleground Statistics Tracker
 local addonName = "BGLogger"
 BGLoggerDB = BGLoggerDB or {}
+BGLoggerSession = BGLoggerSession or {}
 
 ---------------------------------------------------------------------
 -- Config / globals
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
 local selectedLogs = {}
+local Debug
+
+local LINE_HEIGHT            = 20
+local ROW_PADDING_Y          = 2
+local WIN_W, WIN_H           = 1380, 820
+local insideBG, matchSaved   = false, false
+local bgStartTime            = 0
+local MIN_BG_TIME            = 30  -- Minimum seconds in BG before saving
+local DEBUG_MODE             = false -- Set to false for production, true for development
+local saveInProgress         = false
+local ALLOW_TEST_EXPORTS     = DEBUG_MODE
+
+----------------------------------------------------------------------
+-- Session Persistence Helpers
+----------------------------------------------------------------------
+local statePersistTimer = nil
+local stateDirty = false
+
+local function DeepCopyTable(orig, copies)
+    copies = copies or {}
+    if type(orig) ~= "table" then return orig end
+    if copies[orig] then return copies[orig] end
+    local copy = {}
+    copies[orig] = copy
+    for k, v in pairs(orig) do
+        copy[DeepCopyTable(k, copies)] = DeepCopyTable(v, copies)
+    end
+    return copy
+end
+
+local function GetCurrentMatchDuration()
+    local duration = 0
+    if C_PvP and C_PvP.GetActiveMatchDuration then
+        duration = C_PvP.GetActiveMatchDuration() or 0
+    end
+    if (not duration or duration == 0) and GetBattlefieldInstanceRunTime then
+        duration = math.floor((GetBattlefieldInstanceRunTime() or 0) / 1000)
+    end
+    return duration or 0
+end
+
+local function ClearSessionState(reason)
+    if BGLoggerSession then
+        BGLoggerSession.activeMatch = nil
+    end
+    stateDirty = false
+    if reason then
+        Debug("Session state cleared: " .. reason)
+    end
+end
+
+local function FlagStateDirty()
+    if insideBG then
+        stateDirty = true
+    end
+end
+
+local function PersistMatchState(reason)
+    if not insideBG then
+        ClearSessionState(reason or "not in BG")
+        return
+    end
+
+    if not BGLoggerSession then
+        return
+    end
+
+    local snapshot = {
+        timestamp = GetServerTime(),
+        mapID = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0,
+        matchDuration = GetCurrentMatchDuration(),
+        playerTracker = DeepCopyTable(playerTracker),
+        potentialOverflow = DeepCopyTable(potentialOverflow),
+        confirmedOverflow = DeepCopyTable(confirmedOverflow),
+        matchSaved = matchSaved,
+        saveInProgress = saveInProgress,
+        bgStartTime = bgStartTime
+    }
+
+    BGLoggerSession.activeMatch = snapshot
+    stateDirty = false
+    if reason and DEBUG_MODE then
+        Debug("Session state persisted (" .. tostring(reason) .. ")")
+    end
+end
+
+local function StartStatePersistence()
+    if statePersistTimer then return end
+    statePersistTimer = C_Timer.NewTicker(5, function()
+        if stateDirty then
+            PersistMatchState("ticker")
+        end
+    end)
+end
+
+local function StopStatePersistence()
+    if statePersistTimer then
+        statePersistTimer:Cancel()
+        statePersistTimer = nil
+    end
+end
+
+local function TryRestoreMatchState()
+    if not BGLoggerSession or not BGLoggerSession.activeMatch then
+        return false
+    end
+    if not insideBG then
+        return false
+    end
+
+    local state = BGLoggerSession.activeMatch
+    local currentMap = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0
+    if state.mapID and state.mapID > 0 and currentMap and currentMap > 0 and currentMap ~= state.mapID then
+        ClearSessionState("map mismatch on restore")
+        return false
+    end
+
+    local currentDuration = GetCurrentMatchDuration()
+    if state.matchDuration and state.matchDuration > 0 and currentDuration > 0 then
+        local diff = math.abs(currentDuration - state.matchDuration)
+        if diff > 180 then
+            ClearSessionState("duration mismatch on restore")
+            return false
+        end
+    end
+
+    playerTracker = DeepCopyTable(state.playerTracker) or playerTracker
+    potentialOverflow = DeepCopyTable(state.potentialOverflow) or {}
+    confirmedOverflow = DeepCopyTable(state.confirmedOverflow) or {}
+    matchSaved = state.matchSaved or false
+    saveInProgress = state.saveInProgress or false
+    bgStartTime = state.bgStartTime or bgStartTime
+
+    FlagStateDirty()
+    Debug("Restored active battleground state from previous session")
+    return true
+end
 
 ---------------------------------------------------------------------
 -- List Selection Helpers
@@ -152,17 +290,7 @@ local function ExportSelectedFromList()
 		print("|cff00ffffBGLogger:|r ExportSelectedBattlegrounds is not available.")
 	end
 end
-local LINE_HEIGHT            = 20
-local ROW_PADDING_Y          = 2
-local WIN_W, WIN_H           = 1380, 820
-local insideBG, matchSaved   = false, false
-local bgStartTime            = 0
-local MIN_BG_TIME            = 30  -- Minimum seconds in BG before saving
 local GetWinner              = _G.GetBattlefieldWinner -- may be nil on some clients
--- Debug mode: false for production releases, can be toggled by users
-local DEBUG_MODE             = false -- Set to false for production, true for development
-local saveInProgress         = false
-local ALLOW_TEST_EXPORTS     = DEBUG_MODE
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
 
 -- Overflow protection (32-bit wrap) constants for current retail and expansion
@@ -224,7 +352,7 @@ local playerTracker = {
 ---------------------------------------------------------------------
 -- Debug Functions
 ---------------------------------------------------------------------
-local function Debug(msg)
+Debug = function(msg)
     if DEBUG_MODE then
         print("|cff00ffffBGLogger:|r " .. tostring(msg))
     end
@@ -288,6 +416,8 @@ local function ResetPlayerTracker()
 		potentialOverflow = {}
 		confirmedOverflow = {}
         Debug("Player tracker reset for new battleground")
+        FlagStateDirty()
+        PersistMatchState("reset")
     else
         Debug("Skipping tracker reset - still in active battleground")
     end
@@ -370,6 +500,7 @@ local function MarkPotentialOverflow(playerKey, statType)
 	if not potentialOverflow[playerKey][statType] then
 		potentialOverflow[playerKey][statType] = true
 		Debug("Overflow protection: POTENTIAL " .. statType .. " overflow for " .. tostring(playerKey))
+        FlagStateDirty()
 	end
 end
 
@@ -383,6 +514,7 @@ local function CheckConfirmedOverflow(playerKey, statType, currentValue)
 	if not confirmedOverflow[playerKey][statType] and currentValue < OVERFLOW_THRESHOLD then
 		confirmedOverflow[playerKey][statType] = true
 		Debug("Overflow protection: CONFIRMED " .. statType .. " overflow for " .. tostring(playerKey))
+        FlagStateDirty()
 	end
 end
 
@@ -1292,6 +1424,8 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                     Debug("  After augmentation: " .. afterCount .. " players (added " .. (afterCount - beforeCount) .. ")")
                 end
                 playerTracker.initialListCaptured = true
+                FlagStateDirty()
+                PersistMatchState("initial_capture_epic_refresh")
             end)
             return
         end
@@ -1307,6 +1441,8 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
             count = count + 1
         end
     end
+    FlagStateDirty()
+    PersistMatchState("initial_capture")
 end
 
 -- Capture final player list (call this when saving match data)
@@ -1372,6 +1508,8 @@ local function CaptureFinalPlayerList(playerStats)
             count = count + 1
         end
     end
+    FlagStateDirty()
+    PersistMatchState("final_capture")
 end
 
 -- Simple comparison to determine AFKers and Backfills
@@ -2375,6 +2513,8 @@ local function CollectScoreData(attemptNumber)
     
     -- Store AFKer list for later use in exports
     playerTracker.detectedAFKers = afkers
+    FlagStateDirty()
+    PersistMatchState("afk_analysis")
     
     Debug("Analysis complete: " .. #afkers .. " AFKers, " .. #t .. " final players")
     
@@ -2615,6 +2755,8 @@ local function CommitMatch(list)
         Debug("Integrity hash: " .. dataHash)
         
         matchSaved = true
+        ClearSessionState("match saved")
+        StopStatePersistence()
         
         -- Verify the save actually worked
         if BGLoggerDB[key] then
@@ -4444,16 +4586,22 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     insideBG = newBGStatus
     
         if insideBG and not wasInBG then
-            -- Just entered a BG
-            Debug("Entered battleground")
-            bgStartTime = GetTime() -- For fallback duration calculation
-            matchSaved = false
-            saveInProgress = false
-            ResetPlayerTracker() -- Initialize player tracking
-            initialPlayerCount = 0 -- Reset player count tracking
-			-- Start overflow protection polling
+            local restoredState = TryRestoreMatchState()
+            if restoredState then
+                Debug("Restored active battleground session after reload/disconnect")
+            else
+                Debug("Entered battleground")
+                bgStartTime = GetTime() -- For fallback duration calculation
+                matchSaved = false
+                saveInProgress = false
+                ResetPlayerTracker() -- Initialize player tracking
+                initialPlayerCount = 0 -- Reset player count tracking
+            end
+
 			StartOverflowProtection()
+            StartStatePersistence()
             
+            if not playerTracker.initialListCaptured then
             -- CRITICAL: Check if this is an in-progress BG with multiple robust retries
             local function CheckInProgress(attempt)
                 attempt = attempt or 1
@@ -4575,6 +4723,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         
                         -- Mark the player themselves as a backfill candidate
                         playerTracker.playerJoinedInProgress = true
+                        FlagStateDirty()
                         return
                     end
 
@@ -4612,6 +4761,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             Debug("*** FALLBACK: Setting battleHasBegun flag (no start message received) ***")
             playerTracker.battleHasBegun = true
             Debug("Battle begun flag set via fallback timer")
+            FlagStateDirty()
 
             -- If we already determined this is an in-progress join, do not capture the initial list
             if playerTracker.joinedInProgress then
@@ -4642,6 +4792,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
 
             -- Start checking after 30 seconds (longer delay for preparation phase)
             C_Timer.After(25, CheckMatchStart)
+            end
             
         elseif not insideBG and wasInBG then
             -- Just left a BG
@@ -4649,12 +4800,16 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
+            StopStatePersistence()
+            ClearSessionState("left battleground")
         elseif not insideBG then
             -- Reset everything when not in BG
             Debug("Player entering world outside BG, resetting flags")
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
+            StopStatePersistence()
+            ClearSessionState("world load outside BG")
         end
 
         -- Handle BG system messages for match start and end detection
@@ -4686,6 +4841,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 playerTracker.battleHasBegun = true
                 Debug("*** BATTLE HAS BEGUN detected via chat message: " .. message .. " ***")
                 Debug("Battle begun flag set to true")
+                FlagStateDirty()
             elseif isPreparationMessage then
                 Debug("*** PREPARATION MESSAGE detected (ignoring): " .. message .. " ***")
             end
@@ -4770,6 +4926,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                             Debug("*** BATTLE HAS BEGUN detected via API duration: " .. apiDuration .. "s ***")
                             playerTracker.battleHasBegun = true
                             Debug("Battle begun flag set via API detection")
+                            FlagStateDirty()
                         end
                     end
                     
@@ -4854,8 +5011,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         saveInProgress = false
 		-- Stop overflow protection and clear state
 		StopOverflowProtection()
+        StopStatePersistence()
 		potentialOverflow = {}
 		confirmedOverflow = {}
+        ClearSessionState("zone change / leaving world")
         -- Reset player tracker on BG exit
         playerTracker.initialPlayerList = {}
         playerTracker.finalPlayerList = {}
