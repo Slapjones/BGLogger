@@ -119,6 +119,12 @@ local function TryRestoreMatchState()
     end
 
     local state = BGLoggerSession.activeMatch
+    local now = GetServerTime()
+    if state.timestamp and (now - state.timestamp) > 900 then
+        ClearSessionState("snapshot too old")
+        return false
+    end
+
     local currentMap = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0
     if state.mapID and state.mapID > 0 and currentMap and currentMap > 0 and currentMap ~= state.mapID then
         ClearSessionState("map mismatch on restore")
@@ -128,7 +134,8 @@ local function TryRestoreMatchState()
     local currentDuration = GetCurrentMatchDuration()
     if state.matchDuration and state.matchDuration > 0 and currentDuration > 0 then
         local diff = math.abs(currentDuration - state.matchDuration)
-        if diff > 180 then
+        if diff > 900 then
+            Debug(string.format("Session restore duration delta %.0fs exceeds tolerance; abandoning snapshot", diff))
             ClearSessionState("duration mismatch on restore")
             return false
         end
