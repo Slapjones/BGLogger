@@ -274,7 +274,7 @@ function ExportBattleground(key)
 	end
 
 	-- If user joined in-progress, warn they cannot upload as a valid log
-	if (data.joinedInProgress or false) and not ALLOW_TEST_EXPORTS then
+	if (exportData.joinedInProgress or false) and not ALLOW_TEST_EXPORTS then
 		print("|cffff8800BGLogger:|r This record was created after joining an in-progress BG.")
 		print("|cffff8800BGLogger:|r It includes your backfill completion flag but is not valid for stats upload.")
 	end
