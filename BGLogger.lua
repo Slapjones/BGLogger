@@ -2,6 +2,7 @@
 local addonName = "BGLogger"
 BGLoggerDB = BGLoggerDB or {}
 BGLoggerSession = BGLoggerSession or {}
+BGLoggerAccountChars = BGLoggerAccountChars or {} -- Tracks known characters on this account
 
 ---------------------------------------------------------------------
 -- Config / globals
@@ -9,8 +10,11 @@ BGLoggerSession = BGLoggerSession or {}
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
 local selectedLogs = {}
 local Debug
+local RefreshWindow
+local RefreshSeasonDropdown, RefreshCharacterDropdown, RefreshBgTypeDropdown, RefreshMapDropdown
 
 local LINE_HEIGHT            = 20
+local BUTTON_HEIGHT          = LINE_HEIGHT * 2 + 4
 local ROW_PADDING_Y          = 2
 local WIN_W, WIN_H           = 1380, 820
 local insideBG, matchSaved   = false, false
@@ -20,11 +24,193 @@ local DEBUG_MODE             = false -- Set to false for production, true for de
 local saveInProgress         = false
 local ALLOW_TEST_EXPORTS     = DEBUG_MODE
 
+-- Season/filter defaults
+-- NOTE: This should match the 'name' field in the website's Season model (e.g., "tww-s3")
+-- The website will use this to assign uploads to the correct season
+local CURRENT_SEASON         = "tww-s3" -- Update per release when a new season begins
+local CURRENT_SEASON_DISPLAY = "TWW Season 3" -- Human-readable name for UI display
+local UNKNOWN_SEASON         = "Unspecified"
+local ALL_SEASONS_TOKEN      = "__ALL_SEASONS__"
+local ALL_CHARACTERS_TOKEN   = "__ALL_CHARACTERS__"
+local ALL_BG_TYPES_TOKEN     = "__ALL_BG_TYPES__"
+
+local ALL_MAPS_TOKEN = "__ALL_MAPS__"
+
+-- Multi-select filter state (each filter is a set of selected values, or nil/empty for "all")
+-- Note: seasons defaults to CURRENT_SEASON; empty = all for other filters
+local filterState = {
+	seasons = { [CURRENT_SEASON] = true },  -- Default to current season only
+	characters = {},     -- Empty = all characters
+	bgCategories = {},   -- Empty = all BG types
+	maps = {},           -- Empty = all maps
+}
+
+-- Helper to check if a set is empty (meaning "all" are selected)
+local function IsFilterEmpty(filterSet)
+	if not filterSet then return true end
+	return next(filterSet) == nil
+end
+
+-- Helper to count items in a set
+local function CountFilterSelections(filterSet)
+	if not filterSet then return 0 end
+	local count = 0
+	for _ in pairs(filterSet) do
+		count = count + 1
+	end
+	return count
+end
+
+-- Helper to check if a value matches a filter (true if filter is empty/"all" or value is in set)
+local function ValueMatchesFilter(value, filterSet)
+	if IsFilterEmpty(filterSet) then return true end
+	return filterSet[value] == true
+end
+
+-- Toggle a value in a filter set
+local function ToggleFilterValue(filterSet, value)
+	if filterSet[value] then
+		filterSet[value] = nil
+	else
+		filterSet[value] = true
+	end
+end
+
+-- Reset all filters to default values (current season only, empty = all for others)
+local function ResetFilters()
+	wipe(filterState.seasons)
+	filterState.seasons[CURRENT_SEASON] = true  -- Default to current season
+	wipe(filterState.characters)
+	wipe(filterState.bgCategories)
+	wipe(filterState.maps)
+	-- Clear persisted state
+	if BGLoggerSession then
+		BGLoggerSession.filterState = nil
+	end
+end
+
+-- Save current filter state for persistence across sessions
+local function SaveFilterState()
+	BGLoggerSession = BGLoggerSession or {}
+	-- Deep copy the filter sets
+	BGLoggerSession.filterState = {
+		seasons = {},
+		characters = {},
+		bgCategories = {},
+		maps = {},
+	}
+	for k, v in pairs(filterState.seasons) do
+		BGLoggerSession.filterState.seasons[k] = v
+	end
+	for k, v in pairs(filterState.characters) do
+		BGLoggerSession.filterState.characters[k] = v
+	end
+	for k, v in pairs(filterState.bgCategories) do
+		BGLoggerSession.filterState.bgCategories[k] = v
+	end
+	for k, v in pairs(filterState.maps) do
+		BGLoggerSession.filterState.maps[k] = v
+	end
+end
+
+-- Restore filter state from saved session
+local function RestoreFilterState()
+	if not BGLoggerSession or not BGLoggerSession.filterState then return end
+	local saved = BGLoggerSession.filterState
+	
+	-- Wipe current state before restoring
+	wipe(filterState.seasons)
+	wipe(filterState.characters)
+	wipe(filterState.bgCategories)
+	wipe(filterState.maps)
+	
+	-- Restore each filter set from saved state
+	if saved.seasons and next(saved.seasons) then
+		for k, v in pairs(saved.seasons) do
+			filterState.seasons[k] = v
+		end
+	else
+		-- No saved season filter, default to current season
+		filterState.seasons[CURRENT_SEASON] = true
+	end
+	if saved.characters then
+		for k, v in pairs(saved.characters) do
+			filterState.characters[k] = v
+		end
+	end
+	if saved.bgCategories then
+		for k, v in pairs(saved.bgCategories) do
+			filterState.bgCategories[k] = v
+		end
+	end
+	if saved.maps then
+		for k, v in pairs(saved.maps) do
+			filterState.maps[k] = v
+		end
+	end
+end
+
+-- Check if any filters differ from the default state
+-- Default: current season only, all characters, all BG types, all maps
+local function HasActiveFilters()
+	-- Check if season filter differs from default (only current season)
+	local seasonCount = CountFilterSelections(filterState.seasons)
+	local seasonDiffersFromDefault = (seasonCount ~= 1) or (not filterState.seasons[CURRENT_SEASON])
+	
+	return seasonDiffersFromDefault
+		or not IsFilterEmpty(filterState.characters)
+		or not IsFilterEmpty(filterState.bgCategories)
+		or not IsFilterEmpty(filterState.maps)
+end
+
+-- Epic BG detection helpers (mapIDs + names)
+local EPIC_BG_MAP_IDS = {
+	[30] = true,     -- Alterac Valley
+	[628] = true,    -- Isle of Conquest
+	[1191] = true,   -- Ashran
+	[1339] = true,   -- Battle for Wintergrasp / Wintergrasp battleground
+}
+
+local EPIC_BG_NAMES = {
+	["Alterac Valley"] = true,
+	["Isle of Conquest"] = true,
+	["Ashran"] = true,
+	["Wintergrasp"] = true,
+	["Battle for Wintergrasp"] = true,
+}
+
+local BG_CATEGORY_LABELS = {
+	[ALL_BG_TYPES_TOKEN] = "All BG Types",
+	random = "Random BGs",
+	epic = "Epic BGs",
+	rated = "Rated BGs",
+	blitz = "Rated Blitz",
+}
+
 ----------------------------------------------------------------------
 -- Session Persistence Helpers
 ----------------------------------------------------------------------
 local statePersistTimer = nil
 local stateDirty = false
+
+-- Normalize realm names to a consistent, storage-friendly format
+local function NormalizeRealmName(realm)
+	realm = realm or "Unknown-Realm"
+	return realm:gsub("%s+", ""):gsub("'", "")
+end
+
+-- Human-friendly number formatter (e.g., 1.2M / 45.6K / 999)
+local function FormatStatNumber(value)
+	value = tonumber(value) or 0
+	if value >= 1000000000 then
+		return string.format("%.1fB", value / 1000000000)
+	elseif value >= 1000000 then
+		return string.format("%.1fM", value / 1000000)
+	elseif value >= 1000 then
+		return string.format("%.0fK", value / 1000)
+	end
+	return tostring(math.floor(value + 0.5))
+end
 
 local function DeepCopyTable(orig, copies)
     copies = copies or {}
@@ -80,8 +266,6 @@ local function PersistMatchState(reason)
         mapID = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0,
         matchDuration = GetCurrentMatchDuration(),
         playerTracker = DeepCopyTable(playerTracker),
-        potentialOverflow = DeepCopyTable(potentialOverflow),
-        confirmedOverflow = DeepCopyTable(confirmedOverflow),
         matchSaved = matchSaved,
         saveInProgress = saveInProgress,
         bgStartTime = bgStartTime
@@ -142,8 +326,6 @@ local function TryRestoreMatchState()
     end
 
     playerTracker = DeepCopyTable(state.playerTracker) or playerTracker
-    potentialOverflow = DeepCopyTable(state.potentialOverflow) or {}
-    confirmedOverflow = DeepCopyTable(state.confirmedOverflow) or {}
     matchSaved = state.matchSaved or false
     saveInProgress = state.saveInProgress or false
     bgStartTime = state.bgStartTime or bgStartTime
@@ -179,6 +361,908 @@ local function GetSelectedCount()
 		count = count + 1
 	end
 	return count
+end
+
+---------------------------------------------------------------------
+-- Account-wide stat aggregation (personal performance)
+---------------------------------------------------------------------
+local function GetCurrentPlayerIdentity()
+	local name = UnitName("player")
+	local realm = NormalizeRealmName(GetRealmName() or "Unknown-Realm")
+	return name, realm
+end
+
+-- Register the current character in the account-wide character list
+local function RegisterCurrentCharacter()
+	local name, realm = GetCurrentPlayerIdentity()
+	if not name or name == "" or name == "Unknown" then return end
+	
+	local key = string.format("%s-%s", name, realm)
+	BGLoggerAccountChars = BGLoggerAccountChars or {}
+	
+	if not BGLoggerAccountChars[key] then
+		BGLoggerAccountChars[key] = {
+			name = name,
+			realm = realm,
+			firstSeen = GetServerTime()
+		}
+		-- Debug is not defined yet at this point, so we use print directly if needed
+		if DEBUG_MODE then
+			print("|cff00ffffBGLogger:|r Registered new account character: " .. key)
+		end
+	end
+	
+	-- Update last seen time
+	BGLoggerAccountChars[key].lastSeen = GetServerTime()
+end
+
+-- Check if a player key belongs to a known account character
+local function IsKnownAccountCharacter(playerKey)
+	return BGLoggerAccountChars and BGLoggerAccountChars[playerKey] ~= nil
+end
+
+-- Find a known account character in a log's stats
+local function FindKnownAccountCharacterInLog(data)
+	if not data or not data.stats or not BGLoggerAccountChars then return nil, nil end
+	
+	for _, player in ipairs(data.stats) do
+		if player.name and player.realm then
+			local key = string.format("%s-%s", player.name, NormalizeRealmName(player.realm))
+			if BGLoggerAccountChars[key] then
+				return player.name, NormalizeRealmName(player.realm)
+			end
+		end
+	end
+	
+	-- Name-only fallback for legacy data without realm info
+	for _, player in ipairs(data.stats) do
+		if player.name then
+			for accountKey, charInfo in pairs(BGLoggerAccountChars) do
+				if charInfo.name == player.name then
+					-- If we find a name match, use the full key from account chars
+					return charInfo.name, charInfo.realm
+				end
+			end
+		end
+	end
+	
+	return nil, nil
+end
+
+local function FindSelfPlayerEntry(data, fallbackName, fallbackRealm)
+	if not data or type(data.stats) ~= "table" then return nil end
+
+	local targetName = fallbackName
+	local targetRealm = fallbackRealm
+
+	if data.selfPlayer then
+		targetName = data.selfPlayer.name or targetName
+		targetRealm = NormalizeRealmName(data.selfPlayer.realm or targetRealm)
+	elseif data.selfPlayerKey and type(data.selfPlayerKey) == "string" then
+		local n, r = data.selfPlayerKey:match("^(.-)%-(.+)$")
+		if n and r then
+			targetName = n
+			targetRealm = NormalizeRealmName(r)
+		end
+	end
+
+	-- Primary match: name + realm
+	for _, p in ipairs(data.stats) do
+		local realm = NormalizeRealmName(p.realm or "")
+		if p.name == targetName and realm == targetRealm then
+			return p
+		end
+	end
+
+	-- Fallback for legacy data: match name-only when realm data is missing, but only if unique
+	local nameOnlyMatches = {}
+	for _, p in ipairs(data.stats) do
+		if p.name == targetName then
+			table.insert(nameOnlyMatches, p)
+		end
+	end
+	if #nameOnlyMatches == 1 then
+		return nameOnlyMatches[1]
+	end
+
+	return nil
+end
+
+local function GetSelfIdentityFromData(data)
+	if not data then return nil, nil end
+	
+	-- First priority: explicit selfPlayer data
+	if data.selfPlayer then
+		return data.selfPlayer.name, NormalizeRealmName(data.selfPlayer.realm or "")
+	end
+	if data.selfPlayerKey and type(data.selfPlayerKey) == "string" then
+		local n, r = data.selfPlayerKey:match("^(.-)%-(.+)$")
+		if n and r then
+			return n, NormalizeRealmName(r)
+		end
+	end
+	
+	-- Second priority: recorder data
+	if data.recorder then
+		return data.recorder.name, NormalizeRealmName(data.recorder.realm or "")
+	end
+	if data.recorderKey and type(data.recorderKey) == "string" then
+		local n, r = data.recorderKey:match("^(.-)%-(.+)$")
+		if n and r then
+			return n, NormalizeRealmName(r)
+		end
+	end
+	
+	-- Fallback for legacy logs: search for known account characters in the log's stats
+	local foundName, foundRealm = FindKnownAccountCharacterInLog(data)
+	if foundName and foundRealm then
+		return foundName, foundRealm
+	end
+	
+	return nil, nil
+end
+
+-- Normalize legacy season tags to current season identifier
+-- This handles migration of old logs tagged with "Season 1" or no tag
+local function NormalizeSeason(season)
+	if season == nil or season == "" or season == UNKNOWN_SEASON then
+		-- Untagged logs are assumed to be from TWW S3 (the first tracked season)
+		return CURRENT_SEASON
+	end
+	
+	-- Map legacy season names to current identifier
+	local legacyMapping = {
+		["Season 1"] = "tww-s3",  -- Old logs tagged as "Season 1" are TWW S3
+		["season 1"] = "tww-s3",
+		["S1"] = "tww-s3",
+	}
+	
+	local normalized = legacyMapping[season]
+	if normalized then
+		return normalized
+	end
+	
+	return tostring(season)
+end
+
+local function GetLogSeason(data)
+	if not data then return CURRENT_SEASON end
+	return NormalizeSeason(data.season)
+end
+
+local function IsEpicBattleground(data)
+	if not data then return false end
+	if data.mapID and EPIC_BG_MAP_IDS[data.mapID] then
+		return true
+	end
+
+	local mapName = data.battlegroundName
+	if (not mapName) and data.mapID then
+		local mapInfo = C_Map.GetMapInfo(data.mapID)
+		mapName = mapInfo and mapInfo.name
+	end
+
+	if mapName and EPIC_BG_NAMES[mapName] then
+		return true
+	end
+
+	return false
+end
+
+local function GetBattlegroundCategory(data)
+	if not data then return "random" end
+
+	local bgType = data.type or ""
+	
+	-- Separate blitz from regular rated
+	if bgType == "rated-blitz" then
+		return "blitz"
+	end
+	
+	if bgType == "rated" then
+		return "rated"
+	end
+
+	if IsEpicBattleground(data) then
+		return "epic"
+	end
+
+	-- Treat everything else (including brawls/wargames) as random for filtering purposes
+	return "random"
+end
+
+local function GetRecorderKey(data)
+	local name, realm = GetSelfIdentityFromData(data)
+	if name and realm then
+		return string.format("%s-%s", name, realm)
+	end
+	return nil
+end
+
+local function ParsePlayerKey(key)
+	if not key or type(key) ~= "string" then return nil, nil end
+	local n, r = key:match("^(.-)%-(.+)$")
+	if n and r then
+		return n, NormalizeRealmName(r)
+	end
+	return nil, nil
+end
+
+local function NormalizeKey(key)
+	local n, r = ParsePlayerKey(key)
+	if n and r then
+		return string.format("%s-%s", n, r)
+	end
+	return key
+end
+
+local function GetRecorderKeys(data)
+	if not data then return {} end
+	local keys = {}
+	local function add(key)
+		if key and type(key) == "string" then
+			table.insert(keys, NormalizeKey(key))
+		end
+	end
+	add(data.selfPlayerKey)
+	add(data.recorderKey)
+	add(GetRecorderKey(data))
+	return keys
+end
+
+local function FindPlayerEntryByKey(data, key)
+	if not data or not data.stats or not key then return nil end
+	local targetName, targetRealm = ParsePlayerKey(key)
+	if not targetName or not targetRealm then return nil end
+	for _, p in ipairs(data.stats) do
+		if p.name == targetName and NormalizeRealmName(p.realm or "") == targetRealm then
+			return p
+		end
+	end
+	-- Name-only unique fallback for legacy rows
+	local matches = {}
+	for _, p in ipairs(data.stats) do
+		if p.name == targetName then
+			table.insert(matches, p)
+		end
+	end
+	if #matches == 1 then
+		return matches[1]
+	end
+	return nil
+end
+
+local function GetLogMapName(data)
+	if not data then return nil end
+	if data.battlegroundName then
+		return data.battlegroundName
+	end
+	if data.mapID then
+		local mapInfo = C_Map.GetMapInfo(data.mapID)
+		return mapInfo and mapInfo.name
+	end
+	return nil
+end
+
+local function LogMatchesFilters(data)
+	if not data or type(data) ~= "table" or not data.mapID or not data.stats then
+		return false
+	end
+
+	-- Season filter (multi-select)
+	local season = GetLogSeason(data)
+	if not ValueMatchesFilter(season, filterState.seasons) then
+		return false
+	end
+
+	-- BG type filter (multi-select)
+	local category = GetBattlegroundCategory(data)
+	if not ValueMatchesFilter(category, filterState.bgCategories) then
+		return false
+	end
+
+	-- Map name filter (multi-select)
+	local logMapName = GetLogMapName(data)
+	if not ValueMatchesFilter(logMapName, filterState.maps) then
+		return false
+	end
+
+	-- Character filter (multi-select, based on recorder/self tags)
+	if not IsFilterEmpty(filterState.characters) then
+		local candidates = GetRecorderKeys(data)
+		local matched = false
+		for _, candidateKey in ipairs(candidates) do
+			if filterState.characters[candidateKey] then
+				matched = true
+				break
+			end
+		end
+		if not matched then
+			return false
+		end
+	end
+
+	return true
+end
+
+-- Extract numeric season number for proper sorting (e.g., "Season 10" -> 10)
+local function ExtractSeasonNumber(seasonStr)
+	if not seasonStr then return nil end
+	local num = seasonStr:match("(%d+)")
+	return num and tonumber(num) or nil
+end
+
+local function CollectSeasonNames()
+	local seasons = {}
+	local seen = {}
+	seen[CURRENT_SEASON] = true
+
+	for _, data in pairs(BGLoggerDB) do
+		if type(data) == "table" and data.mapID and data.stats then
+			local season = GetLogSeason(data)
+			if season and not seen[season] then
+				seen[season] = true
+			end
+		end
+	end
+
+	for season in pairs(seen) do
+		table.insert(seasons, season)
+	end
+
+	table.sort(seasons, function(a, b)
+		-- Current season always first
+		if a == CURRENT_SEASON then return true end
+		if b == CURRENT_SEASON then return false end
+		-- Unknown season always last
+		if a == UNKNOWN_SEASON then return false end
+		if b == UNKNOWN_SEASON then return true end
+		-- Try numeric comparison for seasons like "Season 1", "Season 10"
+		local numA = ExtractSeasonNumber(a)
+		local numB = ExtractSeasonNumber(b)
+		if numA and numB then
+			return numA > numB  -- Newer seasons (higher numbers) first
+		end
+		-- Fallback to string comparison
+		return a > b  -- Descending order (newer first)
+	end)
+
+	return seasons
+end
+
+-- Collect characters that have logs matching current filters (except character filter itself)
+local function CollectCharacterOptions()
+	local characters = {}
+	for _, data in pairs(BGLoggerDB) do
+		if type(data) == "table" and data.mapID and data.stats then
+			-- Check season filter (multi-select)
+			local logSeason = GetLogSeason(data)
+			local seasonMatches = ValueMatchesFilter(logSeason, filterState.seasons)
+			
+			-- Check BG type filter (multi-select)
+			local bgCategory = GetBattlegroundCategory(data)
+			local bgTypeMatches = ValueMatchesFilter(bgCategory, filterState.bgCategories)
+			
+			-- Check map filter (multi-select)
+			local logMapName = GetLogMapName(data)
+			local mapMatches = ValueMatchesFilter(logMapName, filterState.maps)
+			
+			if seasonMatches and bgTypeMatches and mapMatches then
+				local name, realm = GetSelfIdentityFromData(data)
+				if name and realm then
+					local key = string.format("%s-%s", name, realm)
+					characters[key] = { name = name, realm = realm }
+				end
+			end
+		end
+	end
+
+	local list = {}
+	for key, info in pairs(characters) do
+		table.insert(list, { value = key, text = string.format("%s-%s", info.name, info.realm) })
+	end
+
+	table.sort(list, function(a, b)
+		return a.text < b.text
+	end)
+
+	return list
+end
+
+-- Collect unique map names from logs matching current filters (except map filter itself)
+local function CollectMapNames()
+	local maps = {}
+	local seen = {}
+
+	for _, data in pairs(BGLoggerDB) do
+		if type(data) == "table" and data.mapID and data.stats then
+			-- Check season filter (multi-select)
+			local season = GetLogSeason(data)
+			local seasonMatches = ValueMatchesFilter(season, filterState.seasons)
+			
+			-- Check BG type filter (multi-select)
+			local bgCategory = GetBattlegroundCategory(data)
+			local bgTypeMatches = ValueMatchesFilter(bgCategory, filterState.bgCategories)
+			
+			-- Check character filter (multi-select)
+			local charMatches = true
+			if not IsFilterEmpty(filterState.characters) then
+				local candidates = GetRecorderKeys(data)
+				charMatches = false
+				for _, candidateKey in ipairs(candidates) do
+					if filterState.characters[candidateKey] then
+						charMatches = true
+						break
+					end
+				end
+			end
+			
+			if seasonMatches and bgTypeMatches and charMatches then
+				local mapName = GetLogMapName(data)
+				if mapName and not seen[mapName] then
+					seen[mapName] = true
+					table.insert(maps, mapName)
+				end
+			end
+		end
+	end
+
+	table.sort(maps)
+	return maps
+end
+
+local function ComputeAccountStats()
+	local meName, meRealm = GetCurrentPlayerIdentity()
+	local totals = {
+		games = 0,
+		wins = 0,
+		losses = 0,
+		damage = 0,
+		healing = 0,
+		kills = 0,
+	}
+
+	for _, data in pairs(BGLoggerDB) do
+		if LogMatchesFilters(data) then
+			local targetName, targetRealm
+			local playerEntry = nil
+
+			-- If specific characters are selected, find the matching one from this log
+			if not IsFilterEmpty(filterState.characters) then
+				local candidates = GetRecorderKeys(data)
+				for _, candidateKey in ipairs(candidates) do
+					if filterState.characters[candidateKey] then
+						targetName, targetRealm = ParsePlayerKey(candidateKey)
+						playerEntry = FindSelfPlayerEntry(data, targetName, targetRealm)
+						if playerEntry then break end
+					end
+				end
+			else
+				-- No character filter - use any recorder identity for this log
+				local candidates = GetRecorderKeys(data)
+				if #candidates > 0 then
+					targetName, targetRealm = ParsePlayerKey(candidates[1])
+				else
+					targetName, targetRealm = GetSelfIdentityFromData(data)
+				end
+				
+				if targetName then
+					playerEntry = FindSelfPlayerEntry(data, targetName, targetRealm)
+				end
+
+				-- For "all characters", if recorder identity failed, try current toon as a last resort
+				if not playerEntry then
+					playerEntry = FindSelfPlayerEntry(data, meName, meRealm)
+				end
+			end
+
+			if playerEntry then
+				totals.games = totals.games + 1
+
+				local dmg = playerEntry.damage or playerEntry.dmg or 0
+				local heal = playerEntry.healing or playerEntry.heal or 0
+				local kills = playerEntry.kills or playerEntry.killingBlows or playerEntry.kb or 0
+
+				totals.damage = totals.damage + dmg
+				totals.healing = totals.healing + heal
+				totals.kills = totals.kills + kills
+
+				local winner = data.winner
+				local faction = playerEntry.faction or playerEntry.side
+				if winner and faction then
+					if winner == faction then
+						totals.wins = totals.wins + 1
+					else
+						totals.losses = totals.losses + 1
+					end
+				end
+			end
+		end
+	end
+
+	totals.avgDamage = totals.games > 0 and (totals.damage / totals.games) or 0
+	totals.avgHealing = totals.games > 0 and (totals.healing / totals.games) or 0
+	totals.avgKills = totals.games > 0 and (totals.kills / totals.games) or 0
+
+	return totals
+end
+
+
+local function BuildPersonalSummaryLine(data)
+	if not data then return "" end
+	local meName, meRealm = GetCurrentPlayerIdentity()
+	local identityName, identityRealm = GetSelfIdentityFromData(data)
+
+	local targetName = identityName or meName or "Unknown"
+	local targetRealm = identityRealm or meRealm or "Unknown"
+
+	local playerEntry = FindSelfPlayerEntry(data, targetName, targetRealm)
+	if not playerEntry then
+		return string.format("You: %s-%s  (personal stats not found)", targetName, targetRealm)
+	end
+
+	targetName = playerEntry.name or targetName
+	targetRealm = NormalizeRealmName(playerEntry.realm or targetRealm)
+
+	local duration = tonumber(data.duration) or 0
+	local damage = playerEntry.damage or playerEntry.dmg or 0
+	local healing = playerEntry.healing or playerEntry.heal or 0
+	local kills = playerEntry.kills or playerEntry.killingBlows or playerEntry.kb or 0
+	local deaths = playerEntry.deaths or 0
+
+	local dpsText = (duration and duration > 0) and FormatStatNumber(damage / duration) or "-"
+	local hpsText = (duration and duration > 0) and FormatStatNumber(healing / duration) or "-"
+
+	return string.format(
+		"%s-%s | K/D %d/%d | Dmg %s (DPS %s) | Heal %s (HPS %s)",
+		targetName,
+		targetRealm,
+		kills,
+		deaths,
+		FormatStatNumber(damage),
+		dpsText,
+		FormatStatNumber(healing),
+		hpsText
+	)
+end
+
+local function UpdateStatBar()
+	if not WINDOW or not WINDOW.statBarText then return end
+	local stats = ComputeAccountStats()
+
+	-- Build filter indicator prefix
+	local filterPrefix = ""
+	if HasActiveFilters() then
+		filterPrefix = "|cffFFD100[Filtered]|r "
+	end
+
+	if stats.games == 0 then
+		WINDOW.statBarText:SetText(filterPrefix .. "No matching entries for current filters.")
+		return
+	end
+
+	local text = string.format(
+		"%sGames: %d  W-L: %d-%d (%.0f%%)  Kills: %s  Damage: %s (avg %s)  Healing: %s (avg %s)",
+		filterPrefix,
+		stats.games,
+		stats.wins,
+		stats.losses,
+		stats.games > 0 and (stats.wins / stats.games * 100) or 0,
+		FormatStatNumber(stats.kills),
+		FormatStatNumber(stats.damage),
+		FormatStatNumber(stats.avgDamage),
+		FormatStatNumber(stats.healing),
+		FormatStatNumber(stats.avgHealing)
+	)
+
+	WINDOW.statBarText:SetText(text)
+end
+
+-- Dropdown population helpers for filters
+
+-- Season display name mapping (internal identifier -> human-readable name)
+-- Add entries here when new seasons are added
+local SEASON_DISPLAY_NAMES = {
+	["tww-s3"] = "TWW Season 3",
+	-- Legacy mappings (these get normalized to tww-s3, but just in case)
+	["Season 1"] = "TWW Season 3",
+	["Unspecified"] = "TWW Season 3",
+	-- Future seasons:
+	-- ["midnight-s1"] = "Midnight Season 1",
+}
+
+-- Get human-readable season name from identifier
+local function GetSeasonDisplayName(seasonId)
+	if not seasonId then return "Unknown" end
+	return SEASON_DISPLAY_NAMES[seasonId] or seasonId
+end
+
+-- Multi-select display label helpers
+local function GetSeasonDisplayLabel()
+	local count = CountFilterSelections(filterState.seasons)
+	if count == 0 then
+		return "All Seasons"
+	elseif count == 1 then
+		for season in pairs(filterState.seasons) do
+			return GetSeasonDisplayName(season)
+		end
+	else
+		return string.format("%d Seasons", count)
+	end
+end
+
+local function GetCharacterDisplayLabel()
+	local count = CountFilterSelections(filterState.characters)
+	if count == 0 then
+		return "All Characters"
+	elseif count == 1 then
+		for char in pairs(filterState.characters) do
+			return char
+		end
+	else
+		return string.format("%d Characters", count)
+	end
+end
+
+local function GetBgTypeDisplayLabel()
+	local count = CountFilterSelections(filterState.bgCategories)
+	if count == 0 then
+		return "All BG Types"
+	elseif count == 1 then
+		for category in pairs(filterState.bgCategories) do
+			return BG_CATEGORY_LABELS[category] or category
+		end
+	else
+		return string.format("%d Types", count)
+	end
+end
+
+local function GetMapDisplayLabel()
+	local count = CountFilterSelections(filterState.maps)
+	if count == 0 then
+		return "All Maps"
+	elseif count == 1 then
+		for mapName in pairs(filterState.maps) do
+			return mapName
+		end
+	else
+		return string.format("%d Maps", count)
+	end
+end
+
+RefreshSeasonDropdown = function()
+	if not WINDOW or not WINDOW.seasonDropdown then return end
+
+	local seasons = CollectSeasonNames()
+
+	UIDropDownMenu_Initialize(WINDOW.seasonDropdown, function(frame, level)
+		-- "All Seasons" option
+		local info = UIDropDownMenu_CreateInfo()
+		info.text = "|cffFFD100All Seasons|r"
+		info.notCheckable = true
+		info.func = function()
+			wipe(filterState.seasons)
+			UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
+			WINDOW.currentView = "list"
+			ClearAllSelections()
+			-- Refresh dependent dropdowns
+			RefreshMapDropdown()
+			RefreshCharacterDropdown()
+			CloseDropDownMenus()
+			if RefreshWindow then RefreshWindow() end
+		end
+		UIDropDownMenu_AddButton(info, level)
+
+		-- "Current Season Only" quick option
+		info = UIDropDownMenu_CreateInfo()
+		info.text = "|cff00FF00Current Season Only|r"
+		info.notCheckable = true
+		info.func = function()
+			wipe(filterState.seasons)
+			filterState.seasons[CURRENT_SEASON] = true
+			UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
+			WINDOW.currentView = "list"
+			ClearAllSelections()
+			-- Refresh dependent dropdowns
+			RefreshMapDropdown()
+			RefreshCharacterDropdown()
+			CloseDropDownMenus()
+			if RefreshWindow then RefreshWindow() end
+		end
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Separator
+		info = UIDropDownMenu_CreateInfo()
+		info.disabled = true
+		info.notCheckable = true
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Individual season options (multi-select)
+		for _, season in ipairs(seasons) do
+			info = UIDropDownMenu_CreateInfo()
+			info.text = GetSeasonDisplayName(season)  -- Show human-readable name
+			info.value = season  -- Store identifier
+			info.isNotRadio = true
+			info.keepShownOnClick = true
+			info.checked = filterState.seasons[season] == true
+			info.func = function(self)
+				ToggleFilterValue(filterState.seasons, self.value)
+				UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
+				WINDOW.currentView = "list"
+				ClearAllSelections()
+				-- Refresh dependent dropdowns
+				RefreshMapDropdown()
+				RefreshCharacterDropdown()
+				if RefreshWindow then RefreshWindow() end
+			end
+			UIDropDownMenu_AddButton(info, level)
+		end
+	end)
+
+	UIDropDownMenu_SetWidth(WINDOW.seasonDropdown, 150)
+	UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
+end
+
+RefreshCharacterDropdown = function()
+	if not WINDOW or not WINDOW.characterDropdown then return end
+
+	local options = CollectCharacterOptions()
+
+	UIDropDownMenu_Initialize(WINDOW.characterDropdown, function(frame, level)
+		-- "Clear Selection" option
+		local info = UIDropDownMenu_CreateInfo()
+		info.text = "|cffFFD100Clear Selection|r"
+		info.notCheckable = true
+		info.func = function()
+			wipe(filterState.characters)
+			UIDropDownMenu_SetText(WINDOW.characterDropdown, GetCharacterDisplayLabel())
+			WINDOW.currentView = "list"
+			ClearAllSelections()
+			CloseDropDownMenus()
+			if RefreshWindow then RefreshWindow() end
+		end
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Separator
+		info = UIDropDownMenu_CreateInfo()
+		info.disabled = true
+		info.notCheckable = true
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Individual character options (multi-select)
+		for _, opt in ipairs(options) do
+			info = UIDropDownMenu_CreateInfo()
+			info.text = opt.text
+			info.value = opt.value
+			info.isNotRadio = true
+			info.keepShownOnClick = true
+			info.checked = filterState.characters[opt.value] == true
+			info.func = function(self)
+				ToggleFilterValue(filterState.characters, self.value)
+				UIDropDownMenu_SetText(WINDOW.characterDropdown, GetCharacterDisplayLabel())
+				WINDOW.currentView = "list"
+				ClearAllSelections()
+				if RefreshWindow then RefreshWindow() end
+			end
+			UIDropDownMenu_AddButton(info, level)
+		end
+	end)
+
+	UIDropDownMenu_SetWidth(WINDOW.characterDropdown, 180)
+	UIDropDownMenu_SetText(WINDOW.characterDropdown, GetCharacterDisplayLabel())
+end
+
+RefreshBgTypeDropdown = function()
+	if not WINDOW or not WINDOW.bgTypeDropdown then return end
+
+	UIDropDownMenu_Initialize(WINDOW.bgTypeDropdown, function(frame, level)
+		-- "Clear Selection" option
+		local info = UIDropDownMenu_CreateInfo()
+		info.text = "|cffFFD100Clear Selection|r"
+		info.notCheckable = true
+		info.func = function()
+			wipe(filterState.bgCategories)
+			UIDropDownMenu_SetText(WINDOW.bgTypeDropdown, GetBgTypeDisplayLabel())
+			WINDOW.currentView = "list"
+			ClearAllSelections()
+			CloseDropDownMenus()
+			if RefreshWindow then RefreshWindow() end
+		end
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Separator
+		info = UIDropDownMenu_CreateInfo()
+		info.disabled = true
+		info.notCheckable = true
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Individual BG type options (multi-select)
+		local bgOptions = {
+			{ value = "random", text = BG_CATEGORY_LABELS.random },
+			{ value = "epic", text = BG_CATEGORY_LABELS.epic },
+			{ value = "rated", text = BG_CATEGORY_LABELS.rated },
+			{ value = "blitz", text = BG_CATEGORY_LABELS.blitz },
+		}
+
+		for _, opt in ipairs(bgOptions) do
+			info = UIDropDownMenu_CreateInfo()
+			info.text = opt.text
+			info.value = opt.value
+			info.isNotRadio = true
+			info.keepShownOnClick = true
+			info.checked = filterState.bgCategories[opt.value] == true
+			info.func = function(self)
+				ToggleFilterValue(filterState.bgCategories, self.value)
+				UIDropDownMenu_SetText(WINDOW.bgTypeDropdown, GetBgTypeDisplayLabel())
+				WINDOW.currentView = "list"
+				ClearAllSelections()
+				-- Refresh dependent dropdowns
+				RefreshCharacterDropdown()
+				RefreshMapDropdown()
+				if RefreshWindow then RefreshWindow() end
+			end
+			UIDropDownMenu_AddButton(info, level)
+		end
+	end)
+
+	UIDropDownMenu_SetWidth(WINDOW.bgTypeDropdown, 140)
+	UIDropDownMenu_SetText(WINDOW.bgTypeDropdown, GetBgTypeDisplayLabel())
+end
+
+RefreshMapDropdown = function()
+	if not WINDOW or not WINDOW.mapDropdown then return end
+
+	local maps = CollectMapNames()
+
+	UIDropDownMenu_Initialize(WINDOW.mapDropdown, function(frame, level)
+		-- "Clear Selection" option
+		local info = UIDropDownMenu_CreateInfo()
+		info.text = "|cffFFD100Clear Selection|r"
+		info.notCheckable = true
+		info.func = function()
+			wipe(filterState.maps)
+			UIDropDownMenu_SetText(WINDOW.mapDropdown, GetMapDisplayLabel())
+			WINDOW.currentView = "list"
+			ClearAllSelections()
+			CloseDropDownMenus()
+			if RefreshWindow then RefreshWindow() end
+		end
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Separator
+		info = UIDropDownMenu_CreateInfo()
+		info.disabled = true
+		info.notCheckable = true
+		UIDropDownMenu_AddButton(info, level)
+
+		-- Individual map options (multi-select)
+		for _, mapName in ipairs(maps) do
+			info = UIDropDownMenu_CreateInfo()
+			info.text = mapName
+			info.value = mapName
+			info.isNotRadio = true
+			info.keepShownOnClick = true
+			info.checked = filterState.maps[mapName] == true
+			info.func = function(self)
+				ToggleFilterValue(filterState.maps, self.value)
+				UIDropDownMenu_SetText(WINDOW.mapDropdown, GetMapDisplayLabel())
+				WINDOW.currentView = "list"
+				ClearAllSelections()
+				if RefreshWindow then RefreshWindow() end
+			end
+			UIDropDownMenu_AddButton(info, level)
+		end
+	end)
+
+	UIDropDownMenu_SetWidth(WINDOW.mapDropdown, 160)
+	UIDropDownMenu_SetText(WINDOW.mapDropdown, GetMapDisplayLabel())
+end
+
+local function RefreshFilterDropdowns()
+	RefreshSeasonDropdown()
+	RefreshBgTypeDropdown()
+	RefreshMapDropdown()
+	RefreshCharacterDropdown()
 end
 
 local function PruneInvalidSelections(entries)
@@ -300,12 +1384,6 @@ end
 local GetWinner              = _G.GetBattlefieldWinner -- may be nil on some clients
 -- Removed unused timing detection variables since we now use C_PvP.GetActiveMatchDuration()
 
--- Overflow protection (32-bit wrap) constants for current retail and expansion
--- We use a conservative threshold of 3,000,000,000 to detect nearing the 32-bit unsigned wrap.
--- If a stat crosses this threshold and later is observed below it, we assume a wrap occurred.
-local OVERFLOW_THRESHOLD      = 3000000000      -- 3,000,000,000
-local OVERFLOW_CORRECTION     = 4294967295      -- 2^32 - 1, amount added after wrap
-
 -- Safe wrappers for scoreboard APIs (Midnight compatibility)
 local GetNumBattlefieldScores = _G.GetNumBattlefieldScores
 local RequestBattlefieldScoreData = _G.RequestBattlefieldScoreData
@@ -330,21 +1408,9 @@ if not RequestBattlefieldScoreData then
 	RequestBattlefieldScoreData = function() end
 end
 
--- (overflow tracking removed for new expansion)
-
 -- Persisted per-battleground mapping of PVPStatID -> objective type
 BGLoggerDB.__ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap or {}
 local ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap
-
----------------------------------------------------------------------
--- Overflow Protection State (per match)
----------------------------------------------------------------------
--- Track players that have potentially overflowed (>= threshold at any point)
-local potentialOverflow = {}   -- [playerKey] = { damage = true/false, healing = true/false }
--- Track players that are confirmed to have overflowed (observed dropping below threshold after being potential)
-local confirmedOverflow = {}   -- [playerKey] = { damage = true/false, healing = true/false }
--- Poll timer
-local overflowPollTimer = nil
 
 ---------------------------------------------------------------------
 -- Simple Player List Tracking
@@ -419,9 +1485,6 @@ local function ResetPlayerTracker()
         -- In-progress BG tracking flags
         playerTracker.joinedInProgress = false
         playerTracker.playerJoinedInProgress = false
-		-- Reset overflow protection state
-		potentialOverflow = {}
-		confirmedOverflow = {}
         Debug("Player tracker reset for new battleground")
         FlagStateDirty()
         PersistMatchState("reset")
@@ -490,126 +1553,10 @@ local function FixedWidthRight(text, width)
 end
 
 ---------------------------------------------------------------------
--- (Overflow detection removed for new expansion)
----------------------------------------------------------------------
-
----------------------------------------------------------------------
 -- Objective Data Collection Functions
 ---------------------------------------------------------------------
 
 ---------------------------------------------------------------------
--- Overflow Protection Helpers
----------------------------------------------------------------------
--- Mark a player as potential overflow for the given statType ('damage'|'healing')
-local function MarkPotentialOverflow(playerKey, statType)
-	if not playerKey or not statType then return end
-	potentialOverflow[playerKey] = potentialOverflow[playerKey] or { damage = false, healing = false }
-	if not potentialOverflow[playerKey][statType] then
-		potentialOverflow[playerKey][statType] = true
-		Debug("Overflow protection: POTENTIAL " .. statType .. " overflow for " .. tostring(playerKey))
-        FlagStateDirty()
-	end
-end
-
--- If a player was potential overflow and the stat drops below threshold, confirm overflow for that stat
-local function CheckConfirmedOverflow(playerKey, statType, currentValue)
-	if not playerKey or not statType then return end
-	if not potentialOverflow[playerKey] or not potentialOverflow[playerKey][statType] then
-		return -- Not yet a potential overflow, nothing to confirm
-	end
-	confirmedOverflow[playerKey] = confirmedOverflow[playerKey] or { damage = false, healing = false }
-	if not confirmedOverflow[playerKey][statType] and currentValue < OVERFLOW_THRESHOLD then
-		confirmedOverflow[playerKey][statType] = true
-		Debug("Overflow protection: CONFIRMED " .. statType .. " overflow for " .. tostring(playerKey))
-        FlagStateDirty()
-	end
-end
-
--- Poll the scoreboard every 15 seconds to track potential/confirmed overflows
-local function TrackOverflowCandidates()
-	if not insideBG or matchSaved then return end
-	local rows = GetNumBattlefieldScores()
-	if rows == 0 then return end
-	for i = 1, rows do
-		local success, s = pcall(C_PvP.GetScoreInfo, i)
-		if success and s and s.name then
-			-- Derive stable player key (reuse existing normalization used during save)
-			local playerName, realmName = s.name, ""
-			if s.name:find("-") then
-				playerName, realmName = s.name:match("^(.+)-(.+)$")
-			end
-			if (not realmName or realmName == "") and s.realm then
-				realmName = s.realm
-			end
-			if (not realmName or realmName == "") and s.guid then
-				local _, _, _, _, _, _, _, realmFromGUID = GetPlayerInfoByGUID(s.guid)
-				if realmFromGUID and realmFromGUID ~= "" then
-					realmName = realmFromGUID
-				end
-			end
-			if not realmName or realmName == "" then
-				realmName = GetRealmName() or "Unknown-Realm"
-			end
-			realmName = realmName:gsub("%s+", ""):gsub("'", "")
-			local playerKey = GetPlayerKey(playerName, realmName)
-
-			local currentDamage = s.damageDone or s.damage or 0
-			local currentHealing = s.healingDone or s.healing or 0
-
-			-- Mark potential overflow when crossing threshold
-			if currentDamage >= OVERFLOW_THRESHOLD then
-				MarkPotentialOverflow(playerKey, "damage")
-			end
-			if currentHealing >= OVERFLOW_THRESHOLD then
-				MarkPotentialOverflow(playerKey, "healing")
-			end
-
-			-- Confirm overflow if we were potential and now dropped below threshold
-			CheckConfirmedOverflow(playerKey, "damage", currentDamage)
-			CheckConfirmedOverflow(playerKey, "healing", currentHealing)
-		end
-	end
-end
-
--- Start/Stop 15s polling while match is active
-local function StartOverflowProtection()
-	if overflowPollTimer then return end
-	Debug("Overflow protection: starting 15s scoreboard polling")
-	overflowPollTimer = C_Timer.NewTicker(15, function()
-		if not insideBG or matchSaved then
-			return
-		end
-		TrackOverflowCandidates()
-	end)
-end
-
-local function StopOverflowProtection()
-	if overflowPollTimer then
-		overflowPollTimer:Cancel()
-		overflowPollTimer = nil
-		Debug("Overflow protection: polling stopped")
-	end
-end
-
--- Apply correction to final values if confirmed overflow was detected during match
-local function ApplyOverflowCorrections(playerKey, damage, healing)
-	local correctedDamage = damage or 0
-	local correctedHealing = healing or 0
-	local state = confirmedOverflow[playerKey]
-	if state then
-		if state.damage then
-			correctedDamage = correctedDamage + OVERFLOW_CORRECTION
-		end
-		if state.healing then
-			correctedHealing = correctedHealing + OVERFLOW_CORRECTION
-		end
-	end
-	return correctedDamage, correctedHealing
-end
-
-
-
-
 -- NEW: Extract detailed objective data using the stats table (PVPStatInfo[])
 local function ExtractObjectiveDataFromStats(scoreData)
     if not scoreData or not scoreData.stats then 
@@ -1049,8 +1996,6 @@ local function GetObjectiveColumns(battlegroundName, playerDataList)
     
     return activeColumns
 end
-
--- (overflow tracking removed)
 
 -- Track initial player count to detect when enemy team becomes visible
 local initialPlayerCount = 0
@@ -2409,10 +3354,6 @@ local function CollectScoreData(attemptNumber)
             local rawDamage = s.damageDone or s.damage or 0
             local rawHealing = s.healingDone or s.healing or 0
             
-			-- Apply overflow corrections based on confirmed overflow tracking
-			local playerKeyForCorrection = GetPlayerKey(playerName, realmName)
-			local correctedDamage, correctedHealing = ApplyOverflowCorrections(playerKeyForCorrection, rawDamage, rawHealing)
-			
             -- Extract objective data
             local map = C_Map.GetBestMapForUnit("player") or 0
             local mapInfo = C_Map.GetMapInfo(map)
@@ -2426,8 +3367,8 @@ local function CollectScoreData(attemptNumber)
                 faction = factionName,
                 class = className,
                 spec = specName,
-				damage = correctedDamage,
-				healing = correctedHealing,
+				damage = rawDamage,
+				healing = rawHealing,
                 kills = s.killingBlows or s.kills or 0,
                 deaths = s.deaths or 0,
                 honorableKills = s.honorableKills or s.honorKills or 0,
@@ -2718,6 +3659,9 @@ local function CommitMatch(list)
         Debug("Generated v2 hash at save time: " .. dataHash)
         
         local key = map.."_"..date("!%Y%m%d_%H%M%S")
+		local selfName = UnitName("player")
+		local selfRealm = NormalizeRealmName(GetRealmName() or "Unknown-Realm")
+		local selfFaction = UnitFactionGroup("player") or ""
         Debug("Saving match with key: " .. key)
         
         -- Enhanced battleground data structure WITH HASH
@@ -2733,6 +3677,7 @@ local function CommitMatch(list)
             durationSource = durationSource, -- How duration was determined
             winner = winner,
             type = bgType,
+			season = CURRENT_SEASON,
             startTime = bgStartTime, -- Keep for compatibility
             endTime = currentTime,
             dateISO = date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -2742,6 +3687,10 @@ local function CommitMatch(list)
             joinedInProgress = playerTracker.joinedInProgress or false,
             playerJoinedInProgress = playerTracker.playerJoinedInProgress or false,
             validForStats = not (playerTracker.joinedInProgress or false),
+			selfPlayer = { name = selfName, realm = selfRealm, faction = selfFaction },
+			selfPlayerKey = GetPlayerKey(selfName, selfRealm),
+			recorder = { name = selfName, realm = selfRealm, faction = selfFaction },
+			recorderKey = GetPlayerKey(selfName, selfRealm),
             
             -- INTEGRITY DATA - v2 generated at save time
             integrity = {
@@ -3425,8 +4374,8 @@ end
 
 local function MakeListButton(parent, i)
 	local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-	b:SetHeight(LINE_HEIGHT*2)  -- Make buttons bigger for easier clicking
-	b:SetPoint("TOPLEFT", 0, -(i-1)*(LINE_HEIGHT*2 + 2))  -- Add spacing between buttons
+	b:SetHeight(BUTTON_HEIGHT)
+	b:SetPoint("TOPLEFT", 0, -(i-1)*(BUTTON_HEIGHT + 2))  -- Add spacing between buttons
 	b:SetPoint("RIGHT", parent, "RIGHT", -10, 0)  -- More padding for wider window
 	b:SetText("")
 	b.bg = b:CreateTexture(nil, "BACKGROUND")
@@ -3453,10 +4402,12 @@ local function MakeListButton(parent, i)
 
 	-- Custom label so we can control alignment (make space for checkbox)
 	local label = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	label:SetPoint("TOPLEFT", 28, -2)
-	label:SetPoint("BOTTOMRIGHT", -8, 2)
-	label:SetJustifyH("LEFT")
+	label:SetPoint("TOPLEFT", 32, -4)
+	label:SetPoint("BOTTOMRIGHT", -12, 4)
+	label:SetJustifyH("CENTER")
 	label:SetJustifyV("MIDDLE")
+	label:SetWordWrap(true)
+	label:SetMaxLines(2)
 	label:SetTextColor(1, 1, 1)
 	label:SetText("Loading...")
 	b.label = label
@@ -3471,8 +4422,15 @@ end
 ---------------------------------------------------------------------
 -- Renderers - completely rebuilt
 ---------------------------------------------------------------------
-local function RefreshWindow()
+-- Assign to forward-declared variable (not local function) so callbacks can access it
+RefreshWindow = function()
     if not WINDOW or not WINDOW:IsShown() then return end
+	
+	-- Save filter state for persistence
+	SaveFilterState()
+	
+	RefreshFilterDropdowns()
+	UpdateStatBar()
     
     -- Determine which view to show
     if WINDOW.currentView == "detail" and WINDOW.currentKey then
@@ -3489,6 +4447,7 @@ function ShowList()
     -- Set current view
     WINDOW.currentView = "list"
     WINDOW.currentKey = nil
+	UpdateStatBar()
     
     -- Hide detail view, show list view
     WINDOW.detailScroll:Hide()
@@ -3509,7 +4468,9 @@ function ShowList()
     for k, v in pairs(BGLoggerDB) do
         -- Only include entries that look like battleground data
         if type(v) == "table" and v.mapID and v.stats then
-            table.insert(entries, {key = k, data = v})
+			if LogMatchesFilters(v) then
+				table.insert(entries, {key = k, data = v})
+			end
         else
             Debug("Skipping non-battleground entry: " .. k .. " (type: " .. type(v) .. ")")
         end
@@ -3572,8 +4533,11 @@ function ShowList()
             winnerText = " - " .. data.winner .. " Won"
         end
         
-		-- Set enhanced button text (label)
-		local displayText = string.format("%s%s%s\n%s", mapName, durationText, winnerText, dateDisplay)
+		-- Personal summary line for this match (character + personal stats)
+		local personalLine = BuildPersonalSummaryLine(data)
+
+		-- Two-line layout: top = map/duration + date/time, bottom = personal summary
+		local displayText = string.format("%s%s - %s\n%s", mapName, durationText, dateDisplay, personalLine)
 		if btn.label then
 			btn.label:SetText(displayText)
 		else
@@ -3611,7 +4575,7 @@ function ShowList()
     end
     
     -- Update content height
-    local contentHeight = #entries * (LINE_HEIGHT*2 + 2)
+    local contentHeight = #entries * (BUTTON_HEIGHT + 2)
     WINDOW.listContent:SetHeight(math.max(contentHeight, 10))
     Debug("List view rendered with " .. #entries .. " buttons in chronological order")
 	RefreshListSelectionVisuals()
@@ -3645,6 +4609,17 @@ function ShowDetail(key)
                 -- Old single-text lines (fallback)
                 DetailLines[i]:SetText("")
             end
+            -- Also clear full-width text if it exists (used for header)
+            if DetailLines[i].fullWidthText then
+                DetailLines[i].fullWidthText:SetText("")
+                DetailLines[i].fullWidthText:Hide()
+            end
+            -- Restore column dividers (they may have been hidden for header)
+            if DetailLines[i].columnDividers then
+                for _, divider in ipairs(DetailLines[i].columnDividers) do
+                    divider:Show()
+                end
+            end
             DetailLines[i]:Hide()
         end
     end
@@ -3661,6 +4636,17 @@ function ShowDetail(key)
             else
                 -- Old single-text lines (fallback)
                 DetailLines[i]:SetText("")
+            end
+            -- Also hide full-width text if it exists (used for header)
+            if DetailLines[i].fullWidthText then
+                DetailLines[i].fullWidthText:SetText("")
+                DetailLines[i].fullWidthText:Hide()
+            end
+            -- Show column dividers again (they may have been hidden for header)
+            if DetailLines[i].columnDividers then
+                for _, divider in ipairs(DetailLines[i].columnDividers) do
+                    divider:Show()
+                end
             end
             DetailLines[i]:Hide()
         end
@@ -3700,11 +4686,29 @@ function ShowDetail(key)
         bgInfo = bgInfo .. " | ⚠️ JOINED IN-PROGRESS"
     end
     
-    -- Use first column for header info, span across multiple columns if needed
-    headerInfo.columns.name:SetText(bgInfo)
+    -- Create or reuse a full-width header text that spans all columns
+    if not headerInfo.fullWidthText then
+        headerInfo.fullWidthText = headerInfo:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        headerInfo.fullWidthText:SetFont("Fonts\\ARIALN.TTF", 12, "")
+        headerInfo.fullWidthText:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING, -ROW_PADDING_Y * 0.5)
+        headerInfo.fullWidthText:SetPoint("TOPRIGHT", -DETAIL_LEFT_PADDING, -ROW_PADDING_Y * 0.5)
+        headerInfo.fullWidthText:SetHeight(LINE_HEIGHT)
+        headerInfo.fullWidthText:SetJustifyH("LEFT")
+        headerInfo.fullWidthText:SetJustifyV("MIDDLE")
+        headerInfo.fullWidthText:SetWordWrap(false)
+    end
+    headerInfo.fullWidthText:SetText(bgInfo)
+    headerInfo.fullWidthText:SetTextColor(unpack(DETAIL_TEXT_COLORS.header))
+    headerInfo.fullWidthText:Show()
+    
+    -- Hide the column-based texts for this header row (they would overlap)
     for columnName, column in pairs(headerInfo.columns) do
-        if columnName ~= "name" then
-            column:SetText("")
+        column:SetText("")
+    end
+    -- Hide column dividers for header row
+    if headerInfo.columnDividers then
+        for _, divider in ipairs(headerInfo.columnDividers) do
+            divider:Hide()
         end
     end
     headerInfo:Show()
@@ -4119,6 +5123,76 @@ local function CreateWindow()
 	selectionStatusText:Hide()
 	f.selectionStatusText = selectionStatusText
     
+	-- Filter bar (season / character / BG type)
+	local filterBar = CreateFrame("Frame", nil, f)
+	filterBar:SetPoint("TOPLEFT", 20, -64)
+	filterBar:SetPoint("TOPRIGHT", -20, -64)
+	filterBar:SetHeight(26)
+
+	local seasonLabel = filterBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	seasonLabel:SetPoint("LEFT", 0, 0)
+	seasonLabel:SetText("Season:")
+	local seasonDropdown = CreateFrame("Frame", "BGLoggerSeasonDropdown", filterBar, "UIDropDownMenuTemplate")
+	seasonDropdown:SetPoint("LEFT", seasonLabel, "RIGHT", 4, -2)
+
+	local characterLabel = filterBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	characterLabel:SetPoint("LEFT", seasonDropdown, "RIGHT", 12, 2)
+	characterLabel:SetText("Character:")
+	local characterDropdown = CreateFrame("Frame", "BGLoggerCharacterDropdown", filterBar, "UIDropDownMenuTemplate")
+	characterDropdown:SetPoint("LEFT", characterLabel, "RIGHT", 4, -2)
+
+	local bgTypeLabel = filterBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	bgTypeLabel:SetPoint("LEFT", characterDropdown, "RIGHT", 12, 2)
+	bgTypeLabel:SetText("BG Type:")
+	local bgTypeDropdown = CreateFrame("Frame", "BGLoggerBgTypeDropdown", filterBar, "UIDropDownMenuTemplate")
+	bgTypeDropdown:SetPoint("LEFT", bgTypeLabel, "RIGHT", 4, -2)
+
+	local mapLabel = filterBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	mapLabel:SetPoint("LEFT", bgTypeDropdown, "RIGHT", 12, 2)
+	mapLabel:SetText("Map:")
+	local mapDropdown = CreateFrame("Frame", "BGLoggerMapDropdown", filterBar, "UIDropDownMenuTemplate")
+	mapDropdown:SetPoint("LEFT", mapLabel, "RIGHT", 4, -2)
+
+	-- Reset Filters button
+	local resetFiltersBtn = CreateFrame("Button", nil, filterBar, "UIPanelButtonTemplate")
+	resetFiltersBtn:SetSize(90, 20)
+	resetFiltersBtn:SetPoint("LEFT", mapDropdown, "RIGHT", 20, 2)
+	resetFiltersBtn:SetText("Reset Filters")
+	resetFiltersBtn:SetScript("OnClick", function()
+		ResetFilters()
+		if RefreshWindow then RefreshWindow() end
+	end)
+
+	f.filterBar = filterBar
+	f.seasonDropdown = seasonDropdown
+	f.characterDropdown = characterDropdown
+	f.bgTypeDropdown = bgTypeDropdown
+	f.mapDropdown = mapDropdown
+	f.resetFiltersBtn = resetFiltersBtn
+    
+	-- Account stat bar (personal performance summary)
+	local statBar = CreateFrame("Frame", nil, f, "BackdropTemplate")
+	statBar:SetPoint("TOPLEFT", filterBar, "BOTTOMLEFT", 0, -6)
+	statBar:SetPoint("TOPRIGHT", filterBar, "BOTTOMRIGHT", 0, -6)
+	statBar:SetHeight(26)
+	statBar:SetBackdrop({
+		bgFile = "Interface\\Buttons\\WHITE8x8",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = false, edgeSize = 12,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 }
+	})
+	statBar:SetBackdropColor(0, 0, 0, 0.3)
+	statBar:SetBackdropBorderColor(0.2, 0.2, 0.2, 0.8)
+
+	local statText = statBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	statText:SetPoint("LEFT", 10, 0)
+	statText:SetPoint("RIGHT", -10, 0)
+	statText:SetJustifyH("LEFT")
+	statText:SetText("Account stats: collecting...")
+
+	f.statBar = statBar
+	f.statBarText = statText
+    
     -- Add refresh button
     local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     refreshBtn:SetSize(80, 22)
@@ -4150,7 +5224,7 @@ local function CreateWindow()
     
     -- Create list scroll frame
     local listScroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    listScroll:SetPoint("TOPLEFT", 20, -80)
+    listScroll:SetPoint("TOPLEFT", statBar, "BOTTOMLEFT", 0, -10)
     listScroll:SetPoint("BOTTOMRIGHT", -30, 20)
     
     -- Create list content frame
@@ -4160,7 +5234,7 @@ local function CreateWindow()
     
     -- Create detail scroll frame
     local detailScroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    detailScroll:SetPoint("TOPLEFT", 20, -80)
+    detailScroll:SetPoint("TOPLEFT", statBar, "BOTTOMLEFT", 0, -10)
     detailScroll:SetPoint("BOTTOMRIGHT", -30, 20)
     detailScroll:Hide()
     
@@ -4387,6 +5461,66 @@ function DebugExportVsHash(key)
 end
 
 ---------------------------------------------------------------------
+-- Backfill utility for legacy logs
+---------------------------------------------------------------------
+local function BackfillLegacyLogs()
+	if not BGLoggerAccountChars or not next(BGLoggerAccountChars) then
+		print("|cff00ffffBGLogger:|r No known account characters yet. Log in with each of your characters first.")
+		return 0
+	end
+	
+	local updated = 0
+	local skipped = 0
+	
+	for key, data in pairs(BGLoggerDB) do
+		if type(data) == "table" and data.mapID and data.stats then
+			-- Check if this log already has recorder data
+			if not data.selfPlayer and not data.selfPlayerKey and not data.recorder and not data.recorderKey then
+				-- Try to find a known account character in this log
+				local foundName, foundRealm = FindKnownAccountCharacterInLog(data)
+				if foundName and foundRealm then
+					-- Add recorder data to this legacy log
+					data.selfPlayer = { name = foundName, realm = foundRealm }
+					data.selfPlayerKey = string.format("%s-%s", foundName, foundRealm)
+					data.recorder = { name = foundName, realm = foundRealm }
+					data.recorderKey = string.format("%s-%s", foundName, foundRealm)
+					updated = updated + 1
+				else
+					skipped = skipped + 1
+				end
+			end
+		end
+	end
+	
+	if updated > 0 then
+		print("|cff00ffffBGLogger:|r Updated " .. updated .. " legacy logs with character data.")
+		if skipped > 0 then
+			print("|cff00ffffBGLogger:|r Skipped " .. skipped .. " logs (no known account characters found).")
+		end
+	else
+		print("|cff00ffffBGLogger:|r No legacy logs needed updating.")
+		if skipped > 0 then
+			print("|cff00ffffBGLogger:|r " .. skipped .. " logs have no matching account characters.")
+		end
+	end
+	
+	return updated
+end
+
+-- List known account characters
+local function ListAccountCharacters()
+	if not BGLoggerAccountChars or not next(BGLoggerAccountChars) then
+		print("|cff00ffffBGLogger:|r No account characters registered yet.")
+		return
+	end
+	
+	print("|cff00ffffBGLogger:|r Known account characters:")
+	for key, info in pairs(BGLoggerAccountChars) do
+		print("  - " .. key)
+	end
+end
+
+---------------------------------------------------------------------
 -- Slash commands
 ---------------------------------------------------------------------
 SLASH_BGLOGGER1 = "/bgstats"
@@ -4427,8 +5561,19 @@ SlashCmdList.BGLOGGER = function(msg)
             end
         end)
         return
-		elseif command == "apicheck" or command == "beta" then
+	elseif command == "apicheck" or command == "beta" then
 		DebugBGTypeDetection()
+		return
+	elseif command == "backfill" then
+		-- Backfill legacy logs with recorder data
+		local updated = BackfillLegacyLogs()
+		if updated > 0 and WINDOW and WINDOW:IsShown() then
+			RefreshWindow()
+		end
+		return
+	elseif command == "chars" or command == "characters" then
+		-- List known account characters
+		ListAccountCharacters()
 		return
     elseif command == "help" then
         print("|cff00ffffBGLogger Commands:|r")
@@ -4437,6 +5582,8 @@ SlashCmdList.BGLOGGER = function(msg)
         print("|cffffffff/bglogger testbreakdown|r - Test new objective breakdown system (in BG only)")
         print("|cffffffff/bglogger testretry|r - Test initial capture retry logic (in BG only)")
 		print("|cffffffff/bglogger apicheck|r - Check API availability (in BG shows live)")
+		print("|cffffffff/bglogger backfill|r - Add character data to old logs")
+		print("|cffffffff/bglogger chars|r - List known account characters")
         print("|cffffffff/bglogger help|r - Show this help")
         return
     end
@@ -4466,9 +5613,10 @@ end
 -- Initialize Debug Module (if available)
 ---------------------------------------------------------------------
 
--- Initialize debug mode from saved variables
+-- Initialize debug mode and filter state from saved variables
 C_Timer.After(0.5, function()
     InitializeDebugMode()
+    RestoreFilterState()
 end)
 
 -- Try to initialize debug module
@@ -4589,6 +5737,9 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     end
     
     if e == "PLAYER_ENTERING_WORLD" then
+		-- Always register the current character for cross-character tracking
+		RegisterCurrentCharacter()
+		
     local wasInBG = insideBG
     insideBG = newBGStatus
     
@@ -4605,7 +5756,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 initialPlayerCount = 0 -- Reset player count tracking
             end
 
-			StartOverflowProtection()
             StartStatePersistence()
             
             if not playerTracker.initialListCaptured then
@@ -4807,7 +5957,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
-            StopOverflowProtection()
             ResetPlayerTracker()
             StopStatePersistence()
             ClearSessionState("left battleground")
@@ -4817,7 +5966,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
-            StopOverflowProtection()
             ResetPlayerTracker()
             StopStatePersistence()
             ClearSessionState("world load outside BG")
@@ -5018,7 +6166,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         if insideBG then
             Debug("Leaving battleground event (" .. e .. ") while still in match - persisting state for reload/transition")
             PersistMatchState("leaving_world_event")
-            StopOverflowProtection()
             StopStatePersistence()
             insideBG = false
         else
@@ -5432,8 +6579,6 @@ function DebugInProgressDetection()
     print("=====================================")
 end
 
--- (overflow debug functions removed)
-
 -- Test objective data collection on saved battlegrounds
 function TestObjectiveCollection()
     print("=== Testing Objective Collection on Saved Data ===")
@@ -5493,8 +6638,6 @@ function TestObjectiveCollection()
     
     print("================================================")
 end
-
--- (overflow debug functions removed)
 
 -- Debug function to examine the stats table from GetScoreInfo
 function DebugPVPStatInfo()

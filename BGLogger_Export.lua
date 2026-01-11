@@ -223,11 +223,16 @@ local function BuildExportObject(key)
 		duration = tostring(data.duration or 0),
 		trueDuration = tostring(data.trueDuration or data.duration or 0),
 		winner = data.winner or "",
+		season = data.season or "Unspecified",
 		players = exportPlayers,
 		afkers = afkersList,
 		integrity = data.integrity,
 		joinedInProgress = data.joinedInProgress or false,
-		validForStats = data.validForStats or false
+		validForStats = data.validForStats or false,
+		selfPlayer = data.selfPlayer,
+		selfPlayerKey = data.selfPlayerKey,
+		recorder = data.recorder,
+		recorderKey = data.recorderKey
 	}
 
 	exportData.integrity = exportData.integrity or {}

@@ -3,7 +3,7 @@
 ## Notes: Record of battleground statistics for export
 ## Author: Slapjones
 ## Version: @project-version@
-## SavedVariables: BGLoggerDB, BGLoggerSession
+## SavedVariables: BGLoggerDB, BGLoggerSession, BGLoggerAccountChars
 ## IconTexture: Interface\AddOns\BGLogger\Media\BGLogo.tga
 ## X-Curse-Project-ID: 1286277
 ## X-Wago-ID: n6VPlLGd
