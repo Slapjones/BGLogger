@@ -4,42 +4,27 @@
 -- NOTE: Do not change logic without updating website and the reference in backend/utils/hash.js
 ---------------------------------------------------------------------
 
--- Safe debug logger (avoids dependency on Debug local in main file)
-local function D(msg)
-	if _G and _G.BGLogger_Debug then
-		_G.BGLogger_Debug(msg)
-	end
-end
-
--- Simple hash function using built-in string.byte and math operations
 local function SimpleStringHash(str)
 	local hash = 5381
 	for i = 1, #str do
 		local byte = string.byte(str, i)
-		-- Match backend: 31-bit modulo and 8-char uppercase hex output
 		hash = ((hash * 33) + byte) % 2147483647
 	end
 	return string.format("%08X", hash)
 end
 
--- Generate hash from battleground data
 function GenerateDataHash(battlegroundMetadata, playerList)
-	D("GenerateDataHash called with " .. #playerList .. " players")
 	
-	-- Normalize string function to handle special characters
 	local function normalizeString(str)
 		if not str then return "" end
 		str = tostring(str)
 		
-		-- Replace all non-ASCII characters with underscore for consistency
 		local result = ""
 		for i = 1, #str do
 			local byte = string.byte(str, i)
 			if byte <= 127 then
-				-- Keep ASCII characters as-is
 				result = result .. string.char(byte)
 			else
-				-- Replace any non-ASCII character with underscore
 				result = result .. "_"
 			end
 		end
@@ -47,15 +32,12 @@ function GenerateDataHash(battlegroundMetadata, playerList)
 		return result
 	end
 	
-	-- Create simple string from key data
 	local parts = {}
 	
-	-- Add battleground info (normalize battleground name)
 	table.insert(parts, normalizeString(battlegroundMetadata.battleground or ""))
 	table.insert(parts, tostring(battlegroundMetadata.duration or 0))
 	table.insert(parts, normalizeString(battlegroundMetadata.winner or ""))
 	
-	-- Sort players by name for consistency
 	local sortedPlayers = {}
 	for _, player in ipairs(playerList) do
 		table.insert(sortedPlayers, player)
@@ -67,7 +49,6 @@ function GenerateDataHash(battlegroundMetadata, playerList)
 		return nameA < nameB
 	end)
 	
-	-- Add player data
 	for _, player in ipairs(sortedPlayers) do
 		local playerStr = normalizeString(player.name or "") .. "|" .. 
 					 normalizeString(player.realm or "") .. "|" .. 
@@ -76,33 +57,25 @@ function GenerateDataHash(battlegroundMetadata, playerList)
 		table.insert(parts, playerStr)
 	end
 	
-	-- Generate hash
 	local dataString = table.concat(parts, "||")
 	local hash = SimpleStringHash(dataString)
 	
-	-- Simple metadata
 	local metadata = {
 		playerCount = #playerList,
 		algorithm = "simple_v1"
 	}
 	
-	D("Generated hash: " .. hash)
 	return hash, metadata
 end
 
--- Verify a hash against stored data (for debugging/validation)
 function VerifyDataHash(storedHash, battlegroundMetadata, playerList)
 	local regeneratedHash, metadata = GenerateDataHash(battlegroundMetadata, playerList)
 	local isValid = (storedHash == regeneratedHash)
 	
-	D("Hash verification: " .. (isValid and "VALID" or "INVALID"))
-	D("Stored: " .. tostring(storedHash))
-	D("Regenerated: " .. tostring(regeneratedHash))
 	
 	return isValid, regeneratedHash, metadata
 end
 
--- Extract battleground metadata from saved data for hash verification
 function ExtractBattlegroundMetadata(data)
 	return {
 		battleground = data.battlegroundName or "Unknown Battleground",
@@ -119,7 +92,6 @@ end
 -- This must exactly match backend/utils/hash.js V2 implementation
 ---------------------------------------------------------------------
 
--- Normalize string bytes (non-ASCII -> '_') to match web implementation
 local function NormalizeStringBytes(str)
     if str == nil then return "" end
     str = tostring(str)
@@ -135,10 +107,8 @@ local function NormalizeStringBytes(str)
     return table.concat(out)
 end
 
--- Determine if a Lua table should be treated as an array (1..n sequence)
 local function IsArrayTable(t)
     if type(t) ~= "table" then return false end
-    -- Hint: if an 'n' field is present (common array length hint), treat as array even if empty
     local nField = rawget(t, 'n')
     if type(nField) == "number" then
         return true
@@ -153,7 +123,6 @@ local function IsArrayTable(t)
     return maxIndex > 0
 end
 
--- Canonicalize any Lua value into a deterministic string
 local function CanonicalizeValueV2(value)
     local vt = type(value)
     if value == nil then
@@ -169,7 +138,6 @@ local function CanonicalizeValueV2(value)
     elseif vt == "table" then
         if IsArrayTable(value) then
             local elems = {}
-            -- Serialize each element and sort for order-insensitivity (matches backend)
             local maxIndex = 0
             for k in pairs(value) do if type(k) == "number" and k > maxIndex then maxIndex = k end end
             for i = 1, maxIndex do
@@ -180,7 +148,6 @@ local function CanonicalizeValueV2(value)
             table.sort(elems)
             return "A|" .. table.concat(elems, "|")
         else
-            -- Object: sort keys lexicographically, exclude 'integrity' anywhere in the tree
             local keys = {}
             for k in pairs(value) do
                 if tostring(k) ~= "integrity" then
@@ -200,7 +167,6 @@ local function CanonicalizeValueV2(value)
     end
 end
 
--- Build a normalized v2 payload mirroring the backend's buildHashPayloadV2
 local function ToStringSafeLua(v)
     if v == nil then return "" end
     return tostring(v)
@@ -218,9 +184,6 @@ end
 
 local function NormalizeObjectiveBreakdown(ob)
     if type(ob) ~= "table" then return {} end
-    -- Treat empty arrays (and empty tables) as empty objects
-    -- We can't distinguish array vs object reliably in empty-case, so always return {}
-    -- Non-empty tables are returned as-is
     for _ in pairs(ob) do
         return ob
     end
@@ -252,7 +215,6 @@ function BuildHashPayloadV2_FromExport(json)
             }
         end
     end
-    -- Hint array-ness even when empty
     normPlayers.n = #normPlayers
 
     local normAfkers = {}
@@ -267,7 +229,6 @@ function BuildHashPayloadV2_FromExport(json)
             }
         end
     end
-    -- Hint array-ness even when empty
     normAfkers.n = #normAfkers
 
     return {
@@ -284,9 +245,7 @@ function BuildHashPayloadV2_FromExport(json)
     }
 end
 
--- Public: compute v2 hash from an export-like Lua table (without integrity)
 function GenerateDataHashV2FromExport(exportObject)
-    -- Normalize first to mirror web's buildHashPayloadV2 behavior
     local normalized = BuildHashPayloadV2_FromExport(exportObject)
     local dataString = CanonicalizeValueV2(normalized)
     local hash = SimpleStringHash(dataString)
@@ -294,6 +253,5 @@ function GenerateDataHashV2FromExport(exportObject)
     return hash, metadata
 end
 
--- (Removed debug helper prior to release)
 
 

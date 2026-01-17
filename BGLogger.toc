@@ -11,4 +11,3 @@
 BGLogger_Hash.lua
 BGLogger_Export.lua
 BGLogger.lua
-BGLogger_Debug.lua

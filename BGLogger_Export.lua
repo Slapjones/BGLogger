@@ -3,16 +3,10 @@
 -- Contains export JSON generation and export UI
 ---------------------------------------------------------------------
 
-local function D(msg)
-	if _G and _G.BGLogger_Debug then _G.BGLogger_Debug(msg) end
-end
-
--- Convert Lua table to JSON string
 function TableToJSON(tbl, indent)
 	indent = indent or 0
 	local spacing = string.rep("  ", indent)
 
-	-- Scalars first
 	if type(tbl) == "string" then
 		local escaped = tbl:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n')
 		return '"' .. escaped .. '"'
@@ -24,7 +18,6 @@ function TableToJSON(tbl, indent)
 		return '"' .. tostring(tbl) .. '"'
 	end
 
-	-- Detect array-like tables
 	local isArray = true
 	local arraySize = 0
 	for k, _ in pairs(tbl) do
@@ -63,9 +56,7 @@ function TableToJSON(tbl, indent)
 	end
 end
 
--- Show JSON export frame with read-only text
 function ShowJSONExportFrame(jsonString, filename)
-	D("ShowJSONExportFrame called with " .. #jsonString .. " characters")
 	
 	if not BGLoggerExportFrame then
 		local f = CreateFrame("Frame", "BGLoggerExportFrame", UIParent, "BackdropTemplate")
@@ -85,14 +76,12 @@ function ShowJSONExportFrame(jsonString, filename)
 		title:SetPoint("TOP", 0, -16)
 		title:SetText("Export Battleground Data")
 
-		-- Instructions
 		local inst = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		inst:SetPoint("TOPLEFT", 16, -46)
 		inst:SetWidth(668)
 		inst:SetJustifyH("LEFT")
 		inst:SetText("Copy the JSON below and paste into the website upload page.")
 
-		-- Read-only edit box in a scroll frame
 		local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
 		scroll:SetPoint("TOPLEFT", 16, -70)
 		scroll:SetPoint("BOTTOMRIGHT", -36, 50)
@@ -140,17 +129,13 @@ function ShowJSONExportFrame(jsonString, filename)
 		BGLoggerExportFrame = f
 	end
 	
-	-- Store original text for restoration if modified
 	BGLoggerExportFrame.originalText = jsonString
 	
-	-- Set the JSON text
 	BGLoggerExportFrame.editBox:SetText(jsonString)
 	BGLoggerExportFrame.editBox:SetCursorPosition(0)
 	
-	-- Update filename
 	BGLoggerExportFrame.filenameText:SetText("Save as: " .. filename)
 	
-	-- Adjust editbox height based on content
 	local fontHeight = 12
 	local numLines = 1
 	for _ in jsonString:gmatch('\n') do
@@ -158,10 +143,8 @@ function ShowJSONExportFrame(jsonString, filename)
 	end
 	BGLoggerExportFrame.editBox:SetHeight(math.max(numLines * fontHeight + 50, 100))
 	
-	-- Show the frame
 	BGLoggerExportFrame:Show()
 	
-	D("JSON export frame shown with read-only " .. #jsonString .. " characters")
 end
 
 local function BuildExportObject(key)
@@ -174,13 +157,12 @@ local function BuildExportObject(key)
 		return nil, nil, "Battleground data not found"
 	end
 
-	if not data.integrity and not ALLOW_TEST_EXPORTS then
+	if not data.integrity then
 		return nil, nil, "This battleground was saved without integrity data and cannot be exported safely."
 	end
 
 	local mapName = data.battlegroundName or "Unknown Battleground"
 
-	-- Convert players
 	local exportPlayers = {}
 	local afkersList = {}
 	for _, player in ipairs(data.stats or {}) do
@@ -256,10 +238,7 @@ local function BuildExportObject(key)
 	return exportData, mapName
 end
 
--- Export a single battleground record by key
 function ExportBattleground(key)
-	D("ExportBattleground called for key: " .. tostring(key))
-	
 	local exportData, mapName, err = BuildExportObject(key)
 	if not exportData then
 		if err then
@@ -268,25 +247,12 @@ function ExportBattleground(key)
 		return
 	end
 
-	D("Export using integrity hash (v2): " .. (exportData.integrity and exportData.integrity.hash or "missing"))
-	D("Export includes " .. #(exportData.players or {}) .. " total players, " .. #(exportData.afkers or {}) .. " AFKers")
-
-	-- Generate JSON string
 	local success, jsonString = pcall(TableToJSON, exportData)
 	if not success then
 		print("|cff00ffffBGLogger:|r Error generating JSON: " .. tostring(jsonString))
 		return
 	end
 
-	-- If user joined in-progress, warn they cannot upload as a valid log
-	if (exportData.joinedInProgress or false) and not ALLOW_TEST_EXPORTS then
-		print("|cffff8800BGLogger:|r This record was created after joining an in-progress BG.")
-		print("|cffff8800BGLogger:|r It includes your backfill completion flag but is not valid for stats upload.")
-	end
-
-	D("JSON generated successfully with pre-generated integrity hash, length: " .. #jsonString)
-
-	-- Create filename
 	local filename = string.format("BGLogger_%s_%s.json", 
 		mapName:gsub("%s+", "_"):gsub("[^%w_]", ""),
 		date("!%Y%m%d_%H%M%S")
@@ -330,7 +296,6 @@ function ExportSelectedBattlegrounds(keys)
 	print("|cff00ffffBGLogger:|r Exported " .. successCount .. " battlegrounds in a single multi-log export.")
 end
 
--- Export all battlegrounds as a single concatenated JSON array (copy/paste)
 function ExportAllBattlegrounds()
 	local keys = {}
 	for k, v in pairs(BGLoggerDB) do
@@ -344,7 +309,6 @@ function ExportAllBattlegrounds()
 		if data then
 			local success, json = pcall(function()
 				local original = _G.TableToJSON
-				-- Build a minimal export object similar to single export
 				local mapName = data.battlegroundName or "Unknown Battleground"
 				local exportPlayers = {}
 				for _, p in ipairs(data.stats or {}) do
