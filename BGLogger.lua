@@ -1,14 +1,12 @@
--- BGLogger: Battleground Statistics Tracker
 BGLoggerDB = BGLoggerDB or {}
 BGLoggerSession = BGLoggerSession or {}
 BGLoggerAccountChars = BGLoggerAccountChars or {}
 
 ---------------------------------------------------------------------
--- Config / globals
+-- globals
 ---------------------------------------------------------------------
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
 local selectedLogs = {}
-local Debug
 local RefreshWindow
 local RequestRefreshWindow
 local RefreshSeasonDropdown, RefreshCharacterDropdown, RefreshBgTypeDropdown, RefreshMapDropdown
@@ -21,7 +19,6 @@ local WIN_W, WIN_H           = 1380, 820
 local insideBG, matchSaved   = false, false
 local bgStartTime            = 0
 local MIN_BG_TIME            = 30
-local DEBUG_MODE             = false
 local saveInProgress         = false
 local pendingRefresh         = false
 
@@ -196,9 +193,6 @@ local function ClearSessionState(reason)
         BGLoggerSession.activeMatch = nil
     end
     stateDirty = false
-    if reason then
-        Debug("Session state cleared: " .. reason)
-    end
 end
 
 local function FlagStateDirty()
@@ -229,9 +223,6 @@ local function PersistMatchState(reason)
 
     BGLoggerSession.activeMatch = snapshot
     stateDirty = false
-    if reason and DEBUG_MODE then
-        Debug("Session state persisted (" .. tostring(reason) .. ")")
-    end
 end
 
 local function StartStatePersistence()
@@ -275,7 +266,6 @@ local function TryRestoreMatchState()
     if state.matchDuration and state.matchDuration > 0 and currentDuration > 0 then
         local diff = math.abs(currentDuration - state.matchDuration)
         if diff > 900 then
-            Debug(string.format("Session restore duration delta %.0fs exceeds tolerance; abandoning snapshot", diff))
             ClearSessionState("duration mismatch on restore")
             return false
         end
@@ -287,7 +277,7 @@ local function TryRestoreMatchState()
     bgStartTime = state.bgStartTime or bgStartTime
 
     FlagStateDirty()
-    Debug("Restored active battleground state from previous session")
+
     return true
 end
 
@@ -341,9 +331,6 @@ local function RegisterCurrentCharacter()
 			realm = realm,
 			firstSeen = GetServerTime()
 		}
-		if DEBUG_MODE then
-			print("|cff00ffffBGLogger:|r Registered new account character: " .. key)
-		end
 	end
 	
 	BGLoggerAccountChars[key].lastSeen = GetServerTime()
@@ -1291,20 +1278,6 @@ local playerTracker = {
     battleHasBegun = false,
 }
 
----------------------------------------------------------------------
--- Debug Functions
----------------------------------------------------------------------
-Debug = function(msg)
-    if DEBUG_MODE then
-        print("|cff00ffffBGLogger:|r " .. tostring(msg))
-    end
-end
-
-
----------------------------------------------------------------------
--- Simple Player List Tracking Functions
----------------------------------------------------------------------
-
 local function CountTableEntries(tbl)
     local count = 0
     for _ in pairs(tbl or {}) do
@@ -1324,11 +1297,9 @@ local function ResetPlayerTracker()
         playerTracker.detectedAFKers = {}
         playerTracker.joinedInProgress = false
         playerTracker.playerJoinedInProgress = false
-        Debug("Player tracker reset for new battleground")
         FlagStateDirty()
         PersistMatchState("reset")
-    else
-        Debug("Skipping tracker reset - still in active battleground")
+        
     end
 end
 
@@ -1386,14 +1357,12 @@ local function FixedWidthRight(text, width)
 end
 
 ---------------------------------------------------------------------
--- Objective Data Collection Functions
+-- Objective Data Collection 
 ---------------------------------------------------------------------
 
----------------------------------------------------------------------
--- NEW: Extract detailed objective data using the stats table (PVPStatInfo[])
 local function ExtractObjectiveDataFromStats(scoreData)
     if not scoreData or not scoreData.stats then 
-        Debug("No stats table available, falling back to legacy method")
+        
         return nil
     end
     
@@ -1401,7 +1370,6 @@ local function ExtractObjectiveDataFromStats(scoreData)
     local totalObjectives = 0
     local foundStats = {}
     
-    Debug("Extracting objectives from stats table with " .. #scoreData.stats .. " entries")
     
     for _, stat in ipairs(scoreData.stats) do
         local statName = (stat.name or ""):lower()
@@ -1426,7 +1394,7 @@ local function ExtractObjectiveDataFromStats(scoreData)
             totalObjectives = totalObjectives + statValue
             objectiveBreakdown[learnedType] = (objectiveBreakdown[learnedType] or 0) + statValue
             table.insert(foundStats, { name = originalName, value = statValue, id = statID, type = learnedType })
-            Debug("Found objective via learned mapping: ID " .. tostring(statID) .. " -> " .. learnedType .. " = " .. statValue)
+            
         elseif isObjectiveStat and statValue > 0 then
             totalObjectives = totalObjectives + statValue
             
@@ -1477,25 +1445,16 @@ local function ExtractObjectiveDataFromStats(scoreData)
                 id = statID,
                 type = objectiveType
             })
-            Debug("Found objective stat: " .. originalName .. " = " .. statValue .. " -> " .. objectiveType .. " (ID: " .. tostring(statID) .. ")")
+            
             ObjectiveIdMap[statID] = objectiveType
         end
     end
     
     if #foundStats > 0 then
-        Debug("Stats-based extraction found " .. totalObjectives .. " total objectives from " .. #foundStats .. " stat types")
-        Debug("Objective breakdown: " .. table.concat(
-            (function()
-                local parts = {}
-                for k, v in pairs(objectiveBreakdown) do
-                    table.insert(parts, k .. "=" .. v)
-                end
-                return parts
-            end)(), ", "
-        ))
+        
         return totalObjectives, objectiveBreakdown
     else
-        Debug("No objective stats found in stats table")
+        
         return 0, {}
     end
 end
@@ -1506,7 +1465,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
     local bgName = (battlegroundName or ""):lower()
     local objectiveBreakdown = {}
     
-    Debug("Using LEGACY ExtractObjectiveData for BG: " .. bgName)
     
     if bgName:find("warsong") or bgName:find("twin peaks") then
         local flagsCaptured = scoreData.flagsCaptured or 0
@@ -1516,7 +1474,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         if flagsCaptured > 0 then objectiveBreakdown.flagsCaptured = flagsCaptured end
         if flagsReturned > 0 then objectiveBreakdown.flagsReturned = flagsReturned end
         
-        Debug("CTF BG - Flags captured: " .. flagsCaptured .. ", returned: " .. flagsReturned .. ", total: " .. objectives)
         return objectives, objectiveBreakdown
         
     elseif bgName:find("temple of kotmogu") then
@@ -1525,7 +1482,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         
         if orbScore > 0 then objectiveBreakdown.orbScore = orbScore end
         
-        Debug("Temple of Kotmogu - Orb score: " .. orbScore)
         return orbScore, objectiveBreakdown
         
     elseif bgName:find("arathi basin") or bgName:find("battle for gilneas") or bgName:find("eye of the storm") then
@@ -1536,7 +1492,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         if basesAssaulted > 0 then objectiveBreakdown.basesAssaulted = basesAssaulted end
         if basesDefended > 0 then objectiveBreakdown.basesDefended = basesDefended end
         
-        Debug("Resource BG - Bases assaulted: " .. basesAssaulted .. ", defended: " .. basesDefended .. ", total: " .. objectives)
         return objectives, objectiveBreakdown
         
     elseif bgName:find("alterac valley") or bgName:find("isle of conquest") then
@@ -1555,7 +1510,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         if basesAssaulted > 0 then objectiveBreakdown.basesAssaulted = basesAssaulted end
         if basesDefended > 0 then objectiveBreakdown.basesDefended = basesDefended end
         
-        Debug("Large BG - Towers: " .. (towersAssaulted + towersDefended) .. ", GYs: " .. (graveyardsAssaulted + graveyardsDefended) .. ", Bases: " .. (basesAssaulted + basesDefended) .. ", total: " .. objectives)
         return objectives, objectiveBreakdown
         
     elseif bgName:find("strand") then
@@ -1566,7 +1520,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         if gatesDestroyed > 0 then objectiveBreakdown.gatesDestroyed = gatesDestroyed end
         if gatesDefended > 0 then objectiveBreakdown.gatesDefended = gatesDefended end
         
-        Debug("Strand - Gates destroyed: " .. gatesDestroyed .. ", defended: " .. gatesDefended .. ", total: " .. objectives)
         return objectives, objectiveBreakdown
         
     elseif bgName:find("silvershard") then
@@ -1574,7 +1527,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         
         if cartsControlled > 0 then objectiveBreakdown.cartsControlled = cartsControlled end
         
-        Debug("Silvershard - Carts controlled: " .. cartsControlled)
         return cartsControlled, objectiveBreakdown
         
     elseif bgName:find("deepwind") then
@@ -1585,7 +1537,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         if flagsCaptured > 0 then objectiveBreakdown.flagsCaptured = flagsCaptured end
         if basesAssaulted > 0 then objectiveBreakdown.basesAssaulted = basesAssaulted end
         
-        Debug("Deepwind - Flags: " .. flagsCaptured .. ", bases: " .. basesAssaulted .. ", total: " .. objectives)
         return objectives, objectiveBreakdown
         
     elseif bgName:find("seething shore") then
@@ -1593,7 +1544,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         
         if azeriteCollected > 0 then objectiveBreakdown.azeriteCollected = azeriteCollected end
         
-        Debug("Seething Shore - Azerite collected: " .. azeriteCollected)
         return azeriteCollected, objectiveBreakdown
         
     elseif bgName:find("deephaul") then
@@ -1601,7 +1551,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         
         if cartsEscorted > 0 then objectiveBreakdown.cartsControlled = cartsEscorted end
         
-        Debug("Deephaul - Carts escorted: " .. cartsEscorted)
         return cartsEscorted, objectiveBreakdown
         
     elseif bgName:find("wintergrasp") or bgName:find("tol barad") then
@@ -1612,7 +1561,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
         if structuresDestroyed > 0 then objectiveBreakdown.structuresDestroyed = structuresDestroyed end
         if structuresDefended > 0 then objectiveBreakdown.structuresDefended = structuresDefended end
         
-        Debug("Epic BG - Structures destroyed: " .. structuresDestroyed .. ", defended: " .. structuresDefended .. ", total: " .. objectives)
         return objectives, objectiveBreakdown
         
     else
@@ -1650,7 +1598,6 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
             if value > 0 then
                 objectives = objectives + value
                 objectiveBreakdown[breakdownKey] = (objectiveBreakdown[breakdownKey] or 0) + value
-                Debug("Generic BG - Found " .. fieldName .. ": " .. value .. " -> " .. breakdownKey)
             end
         end
         
@@ -1660,12 +1607,10 @@ local function ExtractObjectiveDataLegacy(scoreData, battlegroundName)
                 if value > 0 then
                     objectives = objectives + value
                     objectiveBreakdown.objectives = (objectiveBreakdown.objectives or 0) + value
-                    Debug("Generic BG - Found " .. field .. ": " .. value)
                 end
             end
         end
         
-        Debug("Generic/Unknown BG (" .. bgName .. ") - Total objectives: " .. objectives)
         return objectives, objectiveBreakdown
     end
 end
@@ -1675,11 +1620,9 @@ local function ExtractObjectiveData(scoreData, battlegroundName)
     
     local statsResult, statsBreakdown = ExtractObjectiveDataFromStats(scoreData)
     if statsResult ~= nil then
-        Debug("Using stats-based objective extraction: " .. statsResult)
         return statsResult, statsBreakdown or {}
     end
     
-    Debug("Stats-based extraction failed, using legacy method")
     return ExtractObjectiveDataLegacy(scoreData, battlegroundName)
 end
 
@@ -1779,10 +1722,6 @@ local function GetObjectiveColumns(battlegroundName, playerDataList)
         table.insert(activeColumns, {key = "objectives", name = "Obj", tooltip = "Total Objectives"})
     end
     
-    Debug("Objective columns for " .. bgName .. ": " .. #activeColumns .. " active columns")
-    for _, col in ipairs(activeColumns) do
-        Debug("  " .. col.key .. " -> " .. col.name .. " (" .. col.tooltip .. ")")
-    end
     
     return activeColumns
 end
@@ -1790,32 +1729,24 @@ end
 local initialPlayerCount = 0
 
 local function IsMatchStarted()
-    Debug("*** IsMatchStarted() called ***")
     local rows = GetNumBattlefieldScores()
     if rows == 0 then 
-		Debug("IsMatchStarted: No battlefield scores available")
 		return false
     end
     
     if not playerTracker.battleHasBegun then
-        Debug("IsMatchStarted: Battle has not begun yet (no battle start message)")
         return false
     end
     
     local apiDuration = 0
     if C_PvP and C_PvP.GetActiveMatchDuration then
         apiDuration = C_PvP.GetActiveMatchDuration() or 0
-        Debug("IsMatchStarted: API duration = " .. apiDuration .. " seconds")
         
         if apiDuration > 5 then
-            Debug("IsMatchStarted: CONFIRMED via API duration > 5 seconds")
             return true
         elseif apiDuration == 0 then
-            Debug("IsMatchStarted: API shows 0 duration - match not started")
             return false
         end
-    else
-        Debug("IsMatchStarted: API duration not available")
     end
     
     local allianceCount, hordeCount = 0, 0
@@ -1851,12 +1782,6 @@ local function IsMatchStarted()
     local timeSinceEntered = GetTime() - bgStartTime
     local minimumWaitTime = IsEpicBattleground() and 20 or 45
     
-    Debug("Match start requirements check:")
-    Debug("  Battle begun message: " .. tostring(playerTracker.battleHasBegun))
-    Debug("  API duration: " .. apiDuration .. " seconds")
-    Debug("  Both factions visible: " .. tostring(bothFactionsVisible) .. " (A=" .. allianceCount .. ", H=" .. hordeCount .. ")")
-    Debug("  Minimum players: " .. tostring(hasMinimumPlayers) .. " (" .. rows .. " total)")
-    Debug("  Time since entered: " .. math.floor(timeSinceEntered) .. "s (min: " .. minimumWaitTime .. "s)")
     
     local matchStarted = playerTracker.battleHasBegun and 
                         apiDuration > 0 and 
@@ -1864,41 +1789,27 @@ local function IsMatchStarted()
                         hasMinimumPlayers and
                         timeSinceEntered >= minimumWaitTime
     
-    Debug("  FINAL RESULT: " .. tostring(matchStarted))
     
     return matchStarted
 end
 
 local function CaptureInitialPlayerList(skipMatchStartCheck)
-    Debug("*** CaptureInitialPlayerList called (skipMatchStartCheck=" .. tostring(skipMatchStartCheck) .. ") ***")
-    Debug("Already captured: " .. tostring(playerTracker.initialListCaptured))
     
     if playerTracker.initialListCaptured then 
-        Debug("Initial player list already captured, skipping")
         return 
     end
     
     if not skipMatchStartCheck and not IsMatchStarted() then
-        Debug("Match hasn't started yet (enemy team not visible), skipping initial capture")
         return
     end
     
-    if skipMatchStartCheck then
-        Debug("*** SKIPPING MATCH START VALIDATION - called from reliable event source ***")
-        Debug("Proceeding directly to capture logic")
-    else
-        Debug("Using match start validation (called from fallback/debug)")
-    end
     
     local rows = GetNumBattlefieldScores()
-    Debug("Battlefield scores available: " .. rows)
     
     if rows == 0 then 
-        Debug("No battlefield scores available yet, skipping initial capture")
         return 
     end
     
-    Debug("*** MATCH HAS STARTED - Starting initial capture with " .. rows .. " players ***")
     
     playerTracker.initialPlayerList = {}
     
@@ -1906,7 +1817,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     if GetNormalizedRealmName and GetNormalizedRealmName() ~= "" then
         playerRealm = GetNormalizedRealmName()
     end
-    Debug("Using player realm: '" .. playerRealm .. "'")
     
     local processedCount = 0
     local skippedCount = 0
@@ -1915,54 +1825,40 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     for i = 1, rows do
         local success, s = pcall(C_PvP.GetScoreInfo, i)
         if success and s then
-            Debug("Processing player " .. i .. ": " .. tostring(s.name or "NO_NAME"))
             
             if not s.name or s.name == "" then
-                Debug("  SKIPPED: Player has no name (distant player in AV?)")
                 skippedCount = skippedCount + 1
             else
                 local playerName, realmName = s.name, ""
             
             if s.name:find("-") then
                 playerName, realmName = s.name:match("^(.+)-(.+)$")
-                Debug("  Split name: '" .. playerName .. "' realm: '" .. realmName .. "'")
-            else
-                Debug("  No realm in name, using fallback methods")
             end
             
             if (not realmName or realmName == "") and s.realm then
                 realmName = s.realm
-                Debug("  Using s.realm: '" .. realmName .. "'")
             end
             
             if (not realmName or realmName == "") and s.guid then
                 local _, _, _, _, _, _, _, realmFromGUID = GetPlayerInfoByGUID(s.guid)
                 if realmFromGUID and realmFromGUID ~= "" then
                     realmName = realmFromGUID
-                    Debug("  Using GUID realm: '" .. realmName .. "'")
                 end
             end
             
             if not realmName or realmName == "" then
                 realmName = playerRealm
-                Debug("  Using fallback playerRealm: '" .. realmName .. "'")
             end
             
             realmName = realmName:gsub("%s+", ""):gsub("'", "")
-            Debug("  Normalized realm: '" .. realmName .. "'")
             
             local playerKey = GetPlayerKey(playerName, realmName)
-            Debug("  Generated key: '" .. playerKey .. "'")
             
             if playerTracker.initialPlayerList[playerKey] then
-                Debug("  KEY COLLISION: Key '" .. playerKey .. "' already exists!")
-                Debug("    Existing: " .. (playerTracker.initialPlayerList[playerKey].name or "nil"))
-                Debug("    New: " .. (playerName or "nil"))
                 keyCollisions[playerKey] = (keyCollisions[playerKey] or 0) + 1
                 
                 local uniqueKey = playerKey .. "_" .. i
                 playerKey = uniqueKey
-                Debug("    Using unique key: '" .. playerKey .. "'")
             end
             
             local className = ""
@@ -2009,31 +1905,19 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 rawSide = s.side,
                 rawRace = s.race
             }
-            Debug("  Added to initial list: " .. className .. " " .. factionName)
             processedCount = processedCount + 1
             
-            if playerName == UnitName("player") then
-                Debug("  THIS IS THE CURRENT PLAYER")
-            end
             end
         else
-            Debug("Failed to get score info for player " .. i)
             skippedCount = skippedCount + 1
         end
     end
     
     local initialCount = CountTableEntries(playerTracker.initialPlayerList)
     
-    Debug("*** Initial capture COMPLETE ***")
-    Debug("  Total API entries: " .. rows)
-    Debug("  Successfully processed: " .. processedCount)
-    Debug("  Skipped (no name): " .. skippedCount)
-    Debug("  Final stored players: " .. initialCount)
     
     if next(keyCollisions) then
-        Debug("  Key collisions detected:")
         for key, count in pairs(keyCollisions) do
-            Debug("    '" .. key .. "': " .. count .. " collisions")
         end
     end
     
@@ -2046,16 +1930,10 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     local mapName = (mapInfo and mapInfo.name) or "Unknown"
     
     if isEpicMap then
-        Debug("  EPIC BG DETECTED - Distance-based data limitations expected (" .. mapName .. ")")
-        if skippedCount > 10 then
-            Debug("    High skip count (" .. skippedCount .. ") is common due to player distance across the large map")
-        end
     end
     
     if isLargeDisparity and not playerTracker.initialCaptureRetried then
-        Debug("  LARGE DISPARITY DETECTED (" .. math.floor(completenessRatio * 100) .. "% success rate)")
         local retryDelay = isEpicMap and 25 or 12
-        Debug("    Scheduling retry in " .. retryDelay .. " seconds to allow players to move closer (epic=" .. tostring(isEpicMap) .. ")...")
         
         playerTracker.firstAttemptStats = {
             rows = rows,
@@ -2072,14 +1950,9 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 RequestBattlefieldScoreData()
                 C_Timer.After(1.0, function()
             if insideBG and not playerTracker.initialListCaptured then
-                Debug("RETRYING INITIAL CAPTURE (players should be closer now)")
                 CaptureInitialPlayerList(true)
-                    else
-                        Debug("Retry cancelled after refresh - no longer in BG or already captured")
                     end
                 end)
-            else
-                Debug("Retry cancelled - no longer in BG or already captured")
             end
         end)
         
@@ -2092,10 +1965,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         local newCompleteness = math.floor((processedCount / rows) * 100)
         local oldCompleteness = math.floor((firstAttempt.processed / firstAttempt.rows) * 100)
         
-        Debug("  RETRY IMPROVEMENT:")
-        Debug("    First attempt: " .. firstAttempt.stored .. " players (" .. oldCompleteness .. "% success)")
-        Debug("    After retry: " .. initialCount .. " players (" .. newCompleteness .. "% success)")
-        Debug("    Improvement: +" .. improvement .. " players")
         
         playerTracker.firstAttemptStats = nil
     end
@@ -2103,7 +1972,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     if IsEpicBattleground() then
         local aCount, hCount = CountFactionsInTable(playerTracker.initialPlayerList)
         if (aCount == 0 or hCount == 0) and not playerTracker.initialCaptureRetried then
-            Debug("  Epic BG initial capture missing a faction (A=" .. aCount .. ", H=" .. hCount .. ") - forcing one more refresh")
             playerTracker.initialCaptureRetried = true
             RequestBattlefieldScoreData()
             C_Timer.After(1.5, function()
@@ -2130,7 +1998,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                         end
                     end
                     local afterCount = CountTableEntries(playerTracker.initialPlayerList)
-                    Debug("  After augmentation: " .. afterCount .. " players (added " .. (afterCount - beforeCount) .. ")")
                 end
                 playerTracker.initialListCaptured = true
                 FlagStateDirty()
@@ -2145,7 +2012,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     local count = 0
     for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
         if count < 3 then
-            Debug("  Sample: " .. playerKey .. " (" .. (playerInfo.class or "Unknown") .. " " .. (playerInfo.faction or "Unknown") .. ")")
             count = count + 1
         end
     end
@@ -2154,35 +2020,25 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
 end
 
 local function CaptureFinalPlayerList(playerStats)
-    Debug("*** CaptureFinalPlayerList called ***")
-    Debug("Player stats provided: " .. #playerStats)
     
     local currentPlayerName = UnitName("player")
     local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
     local currentPlayerKey = GetPlayerKey(currentPlayerName, currentPlayerRealm)
     
-    Debug("*** SEARCHING FOR CURRENT PLAYER ***")
-    Debug("Current player name: '" .. currentPlayerName .. "'")
-    Debug("Current player realm: '" .. currentPlayerRealm .. "'")
-    Debug("Current player key: '" .. currentPlayerKey .. "'")
     
     local foundCurrentPlayer = false
     
     playerTracker.finalPlayerList = {}
     
     for i, player in ipairs(playerStats) do
-        Debug("Processing final player " .. i .. ": " .. player.name .. "-" .. player.realm)
         
         local playerKey = GetPlayerKey(player.name, player.realm)
-        Debug("  Generated key: '" .. playerKey .. "'")
         
         if player.name == currentPlayerName then
-            Debug("  NAME MATCH - current player")
             foundCurrentPlayer = true
         end
         
         if playerKey == currentPlayerKey then
-            Debug("  KEY MATCH - current player")
             foundCurrentPlayer = true
         end
         
@@ -2191,24 +2047,15 @@ local function CaptureFinalPlayerList(playerStats)
             realm = player.realm,
             playerData = player
         }
-        Debug("  Added to final list")
     end
     
-    Debug("*** CURRENT PLAYER SEARCH RESULT ***")
-    Debug("Found current player in final data: " .. tostring(foundCurrentPlayer))
     
-    if not foundCurrentPlayer then
-        Debug("*** ERROR: Current player NOT found in final player data! ***")
-        Debug("This may trigger AFKer detection due to missing current player")
-    end
     
     local finalCount = CountTableEntries(playerTracker.finalPlayerList)
-    Debug("*** Final capture COMPLETE: " .. finalCount .. " players stored ***")
     
     local count = 0
     for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
         if count < 3 then
-            Debug("  Sample: " .. playerKey)
             count = count + 1
         end
     end
@@ -2217,7 +2064,6 @@ local function CaptureFinalPlayerList(playerStats)
 end
 
 local function AnalyzePlayerLists()
-    Debug("*** AnalyzePlayerLists called ***")
     
     local afkers = {}
     local backfills = {}
@@ -2226,83 +2072,47 @@ local function AnalyzePlayerLists()
     local initialCount = CountTableEntries(playerTracker.initialPlayerList)
     local finalCount = CountTableEntries(playerTracker.finalPlayerList)
     
-    Debug("Initial list size: " .. initialCount)
-    Debug("Final list size: " .. finalCount)
-    Debug("Joined in progress: " .. tostring(playerTracker.joinedInProgress or false))
     
     if initialCount == 0 then
-        if playerTracker.joinedInProgress then
-            Debug("INFO: Initial list is EMPTY because player joined in-progress BG")
-            Debug("All players will be marked as 'unknown' participation status")
-        else
-            Debug("WARNING: Initial list is EMPTY! Everyone will be marked as backfill!")
-        end
     end
     
     if finalCount == 0 then
-        Debug("WARNING: Final list is EMPTY! This shouldn't happen!")
         return afkers, backfills, normal
     end
     
     if playerTracker.joinedInProgress then
-        Debug("IN-PROGRESS BG ANALYSIS")
-        Debug("Rule: Cannot reliably determine AFKers/Backfills - player joined mid-match")
-        Debug("All players will be marked as 'unknown' participation status")
         
         for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
             local playerData = playerInfo.playerData
             playerData.participationUnknown = true
             table.insert(normal, playerData)
-            Debug("  Unknown participation: " .. playerKey .. " (joined mid-match)")
         end
         
-        Debug("IN-PROGRESS ANALYSIS COMPLETE")
-        Debug("Normal/Unknown players: " .. #normal)
-        Debug("Backfills: 0 (cannot determine)")
-        Debug("AFKers: 0 (cannot determine)")
         
     else
-        Debug("STANDARD ANALYSIS")
-        Debug("Rule 1: Anyone on final scoreboard = NOT an AFKer (they're still here)")
-        Debug("Rule 2: Anyone on initial list = NOT a backfill (they were here from start)")
         
-        Debug("Step 1: Finding AFKers (in initial but NOT on final scoreboard)")
         for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
             if not playerTracker.finalPlayerList[playerKey] then
                 table.insert(afkers, playerInfo)
-                Debug("  AFKer: " .. playerKey .. " (was in initial, not on final scoreboard)")
             end
         end
-        Debug("Found " .. #afkers .. " AFKers")
         
-        Debug("Step 2: Processing final scoreboard - everyone here is NOT an AFKer")
         for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
             local playerData = playerInfo.playerData
             
             if playerTracker.initialPlayerList[playerKey] then
                 table.insert(normal, playerData)
-                Debug("  Normal: " .. playerKey .. " (in initial list, on final scoreboard)")
             else
                 table.insert(backfills, playerData)
-                Debug("  Backfill: " .. playerKey .. " (NOT in initial list, on final scoreboard)")
             end
         end
         
-        Debug("STANDARD ANALYSIS COMPLETE")
-        Debug("Normal players: " .. #normal .. " (in initial, on final)")
-        Debug("Backfills: " .. #backfills .. " (NOT in initial, on final)")
-        Debug("AFKers: " .. #afkers .. " (in initial, NOT on final)")
     end
     
     local playerName = UnitName("player")
     local playerRealm = GetRealmName() or "Unknown-Realm"
     local yourKey = GetPlayerKey(playerName, playerRealm)
     
-    Debug("YOUR STATUS CHECK")
-    Debug("Your key: " .. yourKey)
-    Debug("In initial: " .. (playerTracker.initialPlayerList[yourKey] and "YES" or "NO"))
-    Debug("In final: " .. (playerTracker.finalPlayerList[yourKey] and "YES" or "NO"))
-    Debug("Joined in progress: " .. tostring(playerTracker.playerJoinedInProgress or false))
     
     local yourStatus = "UNKNOWN"
     if playerTracker.joinedInProgress then
@@ -2321,7 +2131,6 @@ local function AnalyzePlayerLists()
         end
     end
     
-    Debug("Your status: " .. yourStatus)
     
     return afkers, backfills, normal
 end
@@ -2348,27 +2157,18 @@ local function GetBestRealmName()
     return "Unknown-Realm"
 end
 
----------------------------------------------------------------------
--- Hash Generation Functions for BGLogger
----------------------------------------------------------------------
--- Moved to BGLogger_Hash.lua
-
 local function UpdateBattlegroundStatus()
     local _, instanceType = IsInInstance()
     local inBG = false
     
     if instanceType == "pvp" then
         inBG = true
-        Debug("BG detected via instanceType")
     elseif C_PvP and C_PvP.IsBattleground and C_PvP.IsBattleground() then
         inBG = true
-        Debug("BG detected via C_PvP.IsBattleground")
     elseif GetNumBattlefieldScores() > 0 then
         inBG = true
-        Debug("BG detected via battlefield scores")
     elseif UnitInBattleground("player") then
         inBG = true
-        Debug("BG detected via UnitInBattleground")
     end
     
     return inBG
@@ -2402,18 +2202,14 @@ end
 local function CollectScoreData(attemptNumber)
     attemptNumber = attemptNumber or 1
     local t, rows = {}, GetNumBattlefieldScores()
-    Debug("CollectScoreData attempt #" .. attemptNumber .. ": Found " .. rows .. " battlefield score rows")
     
     if rows == 0 then
-        Debug("WARNING: No battlefield scores available on attempt " .. attemptNumber)
         return {}
     end
     
     local currentPlayerName = UnitName("player")
     local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
     currentPlayerRealm = currentPlayerRealm:gsub("%s+", ""):gsub("'", "")
-    Debug("*** CollectScoreData: Looking for current player ***")
-    Debug("Current player: " .. currentPlayerName .. "-" .. currentPlayerRealm)
     local foundCurrentPlayer = false
     
     local playerRealm = GetBestRealmName()
@@ -2484,9 +2280,6 @@ local function CollectScoreData(attemptNumber)
             end
             
             if playerName == currentPlayerName then
-                Debug("*** FOUND CURRENT PLAYER in CollectScoreData ***")
-                Debug("  Name: " .. playerName .. " (matches: " .. currentPlayerName .. ")")
-                Debug("  Realm: " .. realmName .. " (current: " .. currentPlayerRealm .. ")")
                 foundCurrentPlayer = true
             end
             
@@ -2518,24 +2311,9 @@ local function CollectScoreData(attemptNumber)
             t[#t+1] = playerData
         else
             failedReads = failedReads + 1
-            if i <= 5 then
-                Debug("Failed to read player " .. i .. ": " .. tostring(s and s.name or "nil"))
-            end
         end
     end
-    
-    Debug("CollectScoreData completed: " .. successfulReads .. " successful, " .. failedReads .. " failed")
-    
-    Debug("*** CollectScoreData RESULT ***")
-    Debug("Found current player: " .. tostring(foundCurrentPlayer))
-    if not foundCurrentPlayer then
-        Debug("*** ERROR: Current player NOT found in scoreboard data! ***")
-        Debug("This will cause AFKer detection!")
-    end
-    
-    Debug("*** Performing AFKer/Backfill analysis ***")
-    Debug("Final data has " .. #t .. " players")
-    Debug("Initial list has " .. CountTableEntries(playerTracker.initialPlayerList) .. " players")
+     
     
     local afkers = {}
     if not playerTracker.joinedInProgress then
@@ -2558,11 +2336,8 @@ local function CollectScoreData(attemptNumber)
                     faction = playerInfo.faction or "Unknown"
                 }
                 table.insert(afkers, afkerData)
-                Debug("AFKer: " .. playerKey .. " (" .. afkerData.class .. " " .. afkerData.faction .. " - in initial, not in final)")
             end
         end
-    else
-        Debug("Joined in-progress: suppressing AFKer detection for this log")
     end
     
     for _, player in ipairs(t) do
@@ -2572,18 +2347,11 @@ local function CollectScoreData(attemptNumber)
             local isCurrent = (player.name == currentPlayerName and player.realm == currentPlayerRealm)
             player.isBackfill = isCurrent
             player.participationUnknown = not isCurrent
-            if isCurrent then
-                Debug("Backfill (self): " .. playerKey .. " (joined mid-match)")
-            else
-                Debug("Unknown participation: " .. playerKey .. " (joined mid-match)")
-            end
         else
             if not playerTracker.initialPlayerList[playerKey] then
                 player.isBackfill = true
-                Debug("Backfill: " .. playerKey .. " (not in initial)")
             else
                 player.isBackfill = false
-                Debug("Normal: " .. playerKey .. " (in initial)")
             end
             player.participationUnknown = false
         end
@@ -2593,7 +2361,6 @@ local function CollectScoreData(attemptNumber)
     FlagStateDirty()
     PersistMatchState("afk_analysis")
     
-    Debug("Analysis complete: " .. #afkers .. " AFKers, " .. #t .. " final players")
     
     return t
 end
@@ -2612,33 +2379,26 @@ local function DetectAvailableAPIs()
         GetRealmName = _G.GetRealmName,
     }
     
-    Debug("Available APIs:")
     for name, func in pairs(apis) do
-        Debug("  " .. name .. ": " .. (func and "Available" or "Not Available"))
     end
     
     return apis
 end
 
 local function CommitMatch(list)
-    Debug("CommitMatch called, matchSaved=" .. tostring(matchSaved) .. ", list size=" .. #list)
     
     if matchSaved then
-        Debug("Match already saved, not saving again")
         return
     end
     
     if #list == 0 then
-        Debug("Empty player list, cannot save")
         return
     end
 
     local success, result = pcall(function()
         local map = C_Map.GetBestMapForUnit("player") or 0
-        Debug("Map ID: " .. map)
         
         local currentTime = GetTime()
-        Debug("Saving match at time: " .. currentTime)
         
         local duration = 0
         local trueDuration = 0
@@ -2650,12 +2410,7 @@ local function CommitMatch(list)
                 duration = math.floor(apiDuration)
                 trueDuration = duration
                 durationSource = "C_PvP.GetActiveMatchDuration"
-                Debug("Duration from API: " .. duration .. " seconds")
-            else
-                Debug("API returned invalid duration: " .. tostring(apiDuration))
             end
-        else
-            Debug("C_PvP.GetActiveMatchDuration not available")
         end
         
         if duration == 0 then
@@ -2664,20 +2419,14 @@ local function CommitMatch(list)
             if timeSinceBGStart > 0 and timeSinceBGStart < 7200 then
                 trueDuration = timeSinceBGStart
                 durationSource = "calculated_fallback"
-                Debug("Using fallback duration from bgStartTime: " .. trueDuration .. " seconds")
             else
                 trueDuration = 900
                 durationSource = "default_estimate"
-                Debug("Using default duration estimate: " .. trueDuration .. " seconds")
             end
             
             duration = trueDuration
-            if playerTracker.joinedInProgress then
-                Debug("Joined in-progress: duration is a fallback estimate")
-            end
         end
         
-        Debug("Final duration: " .. duration .. " seconds (source: " .. durationSource .. ")")
         
         local winner = ""
         if GetWinner then
@@ -2693,41 +2442,30 @@ local function CommitMatch(list)
 
 		if IsWargame and IsWargame() then
 			bgType = "wargames"
-			Debug("Detected WARGAME via IsWargame()")
 		
 		elseif C_PvP and C_PvP.IsInBrawl and C_PvP.IsInBrawl() then
             bgType = "brawl"
-            Debug("Detected BRAWL via C_PvP.IsInBrawl()")
         
         elseif C_PvP and C_PvP.IsSoloRBG and C_PvP.IsSoloRBG() then
             bgType = "rated-blitz"
-            Debug("Detected RATED BLITZ via C_PvP.IsSoloRBG()")
         
         elseif IsRatedBattleground and IsRatedBattleground() then
             bgType = "rated"
-            Debug("Detected RATED BG via IsRatedBattleground()")
         
         elseif C_PvP and C_PvP.IsBattleground and C_PvP.IsBattleground() then
             bgType = "non-rated"
-            Debug("Detected NON-RATED BG via C_PvP.IsBattleground()")
         
         else
-            Debug("API detection failed, using fallback logic")
             
             if C_PvP and C_PvP.GetActiveMatchBracket then
                 local bracket = C_PvP.GetActiveMatchBracket()
                 if bracket and bracket > 0 then
                     bgType = "rated-blitz"
-                    Debug("Fallback: Detected Blitz via GetActiveMatchBracket: " .. bracket)
                 end
             end
             
-            if bgType == "non-rated" then
-                Debug("Fallback: Defaulting to non-rated battleground")
-            end
         end
 
-        Debug("Final BG type determined: " .. bgType)
         
         local mapInfo = C_Map.GetMapInfo(map)
         local mapName = (mapInfo and mapInfo.name) or "Unknown Battleground"
@@ -2764,13 +2502,11 @@ local function CommitMatch(list)
             validForStats = not (playerTracker.joinedInProgress or false)
         }
         local dataHash, hashMetadata = GenerateDataHashV2FromExport(forHashV2)
-        Debug("Generated v2 hash at save time: " .. dataHash)
         
         local key = map.."_"..date("!%Y%m%d_%H%M%S")
 		local selfName = UnitName("player")
 		local selfRealm = NormalizeRealmName(GetRealmName() or "Unknown-Realm")
 		local selfFaction = UnitFactionGroup("player") or ""
-        Debug("Saving match with key: " .. key)
         
         BGLoggerDB[key] = {
             mapID = map,
@@ -2806,21 +2542,13 @@ local function CommitMatch(list)
             }
         }
         
-        Debug("Match saved successfully with " .. #list .. " players")
-        Debug("Duration: " .. duration .. " seconds (source: " .. durationSource .. ")")
-        Debug("Winner: " .. (winner ~= "" and winner or "Unknown"))
-        Debug("Type: " .. bgType)
-        Debug("Map: " .. mapName)
-        Debug("Integrity hash: " .. dataHash)
         
         matchSaved = true
         ClearSessionState("match saved")
         StopStatePersistence()
         
         if BGLoggerDB[key] then
-            Debug("Save verification successful - entry exists in database with integrity hash")
         else
-            Debug("ERROR: Save verification failed - entry not found in database!")
             return false
         end
         
@@ -2828,7 +2556,6 @@ local function CommitMatch(list)
     end)
     
     if not success then
-        Debug("ERROR in CommitMatch: " .. tostring(result))
         return false
     end
     
@@ -2841,7 +2568,6 @@ end
 
 local function PollUntilWinner(retries)
     retries = retries or 0
-    Debug("Polling for winner, attempt " .. retries)
     
     RequestBattlefieldScoreData()
     
@@ -2849,12 +2575,10 @@ local function PollUntilWinner(retries)
         local win = GetWinner and GetWinner() or nil
         
         if win then
-            Debug("Winner found on poll attempt " .. retries)
             CommitMatch(CollectScoreData())
         elseif retries < 5 then
             PollUntilWinner(retries + 1)
         else
-            Debug("Max poll attempts reached, saving regardless")
             CommitMatch(CollectScoreData())
         end
     end)
@@ -2862,15 +2586,12 @@ end
 
 function AttemptSaveWithRetry(source, retryCount)
     retryCount = retryCount or 0
-    Debug("AttemptSaveWithRetry called from " .. source .. ", attempt " .. (retryCount + 1))
     
     if matchSaved then
-        Debug("Match already saved, aborting")
         return
     end
     
     if saveInProgress then
-        Debug("Save already in progress, aborting duplicate save from " .. source)
         return
     end
     
@@ -2879,21 +2600,17 @@ function AttemptSaveWithRetry(source, retryCount)
     RequestBattlefieldScoreData()
     
     local delay = 2 + (retryCount * 0.5)
-    Debug("Waiting " .. delay .. " seconds for score data to populate...")
     
     C_Timer.After(delay, function()
         local success, result = pcall(function()
             local data = CollectScoreData()
-            Debug("Collected " .. #data .. " player records")
             
             if #data == 0 then
-                Debug("No player data collected")
                 return false
             end
             
             local minExpectedPlayers = 10
             if #data < minExpectedPlayers then
-                Debug("Too few players (" .. #data .. "), expected at least " .. minExpectedPlayers)
                 return false
             end
             
@@ -2905,44 +2622,34 @@ function AttemptSaveWithRetry(source, retryCount)
                 end
             end
             
-            Debug("Found " .. validPlayers .. " valid players with stats out of " .. #data)
             
             if validPlayers < minExpectedPlayers then
-                Debug("Too few valid players with stats")
                 return false
             end
             
-            Debug("Attempting to commit match data...")
             local saveSuccess = CommitMatch(data)
             
             if matchSaved then
-                Debug("Match successfully saved!")
                 saveInProgress = false
                 return true
             else
-                Debug("CommitMatch returned but matchSaved is still false")
                 return false
             end
         end)
         
         if success and result then
-            Debug("Save successful from " .. source)
             saveInProgress = false
         elseif success and not result then
-            Debug("Save failed (insufficient data) from " .. source)
             
             if retryCount < 3 then
-                Debug("Retrying save in 3 seconds...")
                 C_Timer.After(3, function()
                     saveInProgress = false
                     AttemptSaveWithRetry(source, retryCount + 1)
                 end)
             else
-                Debug("Max retries reached, giving up on save from " .. source)
                 saveInProgress = false
             end
         else
-            Debug("Save failed with error from " .. source .. ": " .. tostring(result))
             saveInProgress = false
         end
     end)
@@ -3021,7 +2728,6 @@ end
 
 if not ShowJSONExportFrame then
 function ShowJSONExportFrame(jsonString, filename)
-    Debug("ShowJSONExportFrame called with " .. #jsonString .. " characters")
     
     if not BGLoggerExportFrame then
         local f = CreateFrame("Frame", "BGLoggerExportFrame", UIParent, "BackdropTemplate")
@@ -3137,7 +2843,6 @@ function ShowJSONExportFrame(jsonString, filename)
     
     BGLoggerExportFrame:Show()
     
-    Debug("JSON export frame shown with read-only " .. #jsonString .. " characters")
 end
 end
 
@@ -3505,7 +3210,6 @@ RefreshWindow = function()
 end
 
 function ShowList()
-    Debug("ShowList called, DB has " .. CountTableEntries(BGLoggerDB) .. " entries")
     
     WINDOW.currentView = "list"
     WINDOW.currentKey = nil
@@ -3529,8 +3233,6 @@ function ShowList()
 			if LogMatchesFilters(v) then
 				table.insert(entries, {key = k, data = v})
 			end
-        else
-            Debug("Skipping non-battleground entry: " .. k .. " (type: " .. type(v) .. ")")
         end
     end
     
@@ -3546,7 +3248,6 @@ function ShowList()
         return a.key > b.key
     end)
     
-	Debug("Sorted " .. #entries .. " battleground entries chronologically")
 	WINDOW.currentEntries = entries
 	PruneInvalidSelections(entries)
     
@@ -3600,7 +3301,6 @@ function ShowList()
 				UpdateSelectionToolbar()
 				return
 			end
-			Debug("Clicked button for " .. tostring(self.bgKey))
 			ShowDetail(self.bgKey) 
         end)
 		local isSelected = IsLogSelected(k)
@@ -3622,13 +3322,11 @@ function ShowList()
     
     local contentHeight = #entries * (BUTTON_HEIGHT + 2)
     WINDOW.listContent:SetHeight(math.max(contentHeight, 10))
-    Debug("List view rendered with " .. #entries .. " buttons in chronological order")
 	RefreshListSelectionVisuals()
 	UpdateSelectionToolbar()
 end
 
 function ShowDetail(key)
-    Debug("ShowDetail called for key: " .. tostring(key))
     
     WINDOW.currentView = "detail"
     WINDOW.currentKey = key
@@ -4023,14 +3721,12 @@ function ShowDetail(key)
     end
 
     WINDOW.detailContent:SetHeight(math.max((currentLineIndex-1)*LINE_HEIGHT, 10))
-    Debug("Detail view rendered with " .. #rows .. " players, showing enhanced stats")
 end
 
 ---------------------------------------------------------------------
 -- Window - completely rebuilt
 ---------------------------------------------------------------------
 local function CreateWindow()
-    Debug("Creating window...")
     
     local f = CreateFrame("Frame", "BGLoggerWindow", UIParent, "BackdropTemplate")
     f:SetSize(WIN_W, WIN_H)
@@ -4195,7 +3891,6 @@ local function CreateWindow()
     exportBtn:SetScript("OnClick", function()
         if WINDOW.currentView == "detail" and WINDOW.currentKey then
             ExportBattleground(WINDOW.currentKey)
-        else
         end
     end)
     exportBtn:Hide()
@@ -4261,7 +3956,6 @@ local function CreateMinimapButton()
         iconTexture = "Interface\\Icons\\Achievement-pvp-legion03"
     end
     
-    Debug("Minimap button using " .. playerFaction .. " icon: " .. iconTexture)
     
     local icon = button:CreateTexture(nil, "BACKGROUND")
     icon:SetSize(20, 20)
@@ -4345,7 +4039,6 @@ local function CreateMinimapButton()
     MinimapButton.button = button
     UpdatePosition()
     
-    Debug("Minimap button created")
     return button
 end
 
@@ -4369,18 +4062,14 @@ end
 ---------------------------------------------------------------------
 SLASH_BGLOGGER1 = "/bglogger"
 SlashCmdList.BGLOGGER = function()
-    Debug("Slash command executed")
     
     if not WINDOW then
-        Debug("Creating window")
         WINDOW = CreateWindow()
     end
     
     if WINDOW:IsShown() then
-        Debug("Hiding window")
         WINDOW:Hide()
     else
-        Debug("Showing window")
         WINDOW:Show()
         
         C_Timer.After(0.1, RequestRefreshWindow)
@@ -4417,24 +4106,12 @@ for _, eventName in ipairs(additionalEvents) do
     local success, err = pcall(function()
         Driver:RegisterEvent(eventName)
     end)
-    if success then
-        Debug("Registered event: " .. eventName)
-    else
-        Debug("Failed to register event: " .. eventName .. " (not available)")
-    end
 end
 
 Driver:SetScript("OnEvent", function(_, e, ...)
     local newBGStatus = UpdateBattlegroundStatus()
     local statusChanged = (newBGStatus ~= insideBG)
     
-    if DEBUG_MODE then
-        Debug("Event: " .. e .. " (insideBG=" .. tostring(newBGStatus) .. ", matchSaved=" .. tostring(matchSaved) .. ")")
-        if statusChanged then
-            Debug("BG Status changed: " .. tostring(insideBG) .. " -> " .. tostring(newBGStatus))
-        end
-    end
-
     if e == "PLAYER_REGEN_ENABLED" then
         if pendingRefresh then
             RequestRefreshWindow()
@@ -4451,9 +4128,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         if insideBG and not wasInBG then
             local restoredState = TryRestoreMatchState()
             if restoredState then
-                Debug("Restored active battleground session after reload/disconnect")
             else
-                Debug("Entered battleground")
                 bgStartTime = GetTime()
                 matchSaved = false
                 saveInProgress = false
@@ -4468,7 +4143,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 attempt = attempt or 1
                 if not insideBG then return end
                 if (playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured)) then
-                    Debug("CheckInProgress aborted: match started or initial list captured (attempt " .. tostring(attempt) .. ")")
                     return
                 end
                     local isInProgressBG = false
@@ -4479,7 +4153,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 C_Timer.After(0.6, function()
                     if not insideBG then return end
                     if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
-                        Debug("CheckInProgress inner aborted: match started or initial list captured")
                         return
                     end
                     
@@ -4487,12 +4160,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         local apiDuration = C_PvP.GetActiveMatchDuration() or 0
                         local timeInside = GetTime() - (bgStartTime or GetTime())
                         local durationDelta = apiDuration - timeInside
-                        Debug(string.format("In-progress API check: apiDuration=%.1fs, timeInside=%.1fs, delta=%.1fs", apiDuration, timeInside, durationDelta))
 
                         if apiDuration > 5 and durationDelta >= 10 then
                             isInProgressBG = true
                             detectionMethod = string.format("API_duration_%ss_delta_%s", tostring(apiDuration), tostring(math.floor(durationDelta)))
-                            Debug("IN-PROGRESS BG detected via API duration delta (attempt " .. attempt .. ")")
                         end
                     end
                     
@@ -4552,25 +4223,19 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                                 end
                             end
 
-                            Debug(string.format("Enemy visibility check: myFaction=%s, enemyFactionId=%s, visibleEnemy=%d (threshold=%d), activeEnemy=%d (threshold=%d), A=%d, H=%d", tostring(myFaction), tostring(enemyFactionId), visibleEnemy, allowedThreshold, activeEnemy, activeEnemyThreshold, allianceCount, hordeCount))
 
                             if enemyFactionId ~= nil and visibleEnemy >= allowedThreshold and activeEnemy >= activeEnemyThreshold then
                                 isInProgressBG = true
                                 detectionMethod = string.format("enemy_visible_%d_players", visibleEnemy)
-                                Debug("IN-PROGRESS BG detected via enemy visibility threshold (attempt " .. attempt .. ")")
                             end
                         end
                     end
                     
                     if isInProgressBG then
-                        Debug("*** IN-PROGRESS BATTLEGROUND DETECTED ***")
-                        Debug("Detection method: " .. detectionMethod)
-                        Debug("Player joined an ongoing match - adjusting tracking behavior")
                         
                         playerTracker.joinedInProgress = true
                         playerTracker.battleHasBegun = true
                         
-                        Debug("*** Capturing current player state as baseline (in-progress join) ***")
                         CaptureInitialPlayerList(true)
                         
                         playerTracker.playerJoinedInProgress = true
@@ -4585,20 +4250,15 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         local nextDelay = delays[attempt + 1] or 10
                         C_Timer.After(nextDelay, function() 
                             if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
-                                Debug("CheckInProgress retries cancelled: match started or initial list captured")
                                 return
                             end
                             CheckInProgress(attempt + 1) 
                         end)
-                    else
-                        Debug("Normal BG join detected - waiting for match to start")
-                        Debug("Waiting for match to start before capturing initial player list")
                 end
             end)
             end
             C_Timer.After(2, function() 
                 if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
-                    Debug("Initial CheckInProgress skipped: match already started or initial list captured")
                     return
                 end
                 CheckInProgress(1) 
@@ -4606,13 +4266,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             
     C_Timer.After(90, function()
         if insideBG and not playerTracker.battleHasBegun then
-            Debug("*** FALLBACK: Setting battleHasBegun flag (no start message received) ***")
             playerTracker.battleHasBegun = true
-            Debug("Battle begun flag set via fallback timer")
             FlagStateDirty()
 
             if playerTracker.joinedInProgress then
-                Debug("Fallback battle start: joinedInProgress already true, skipping initial capture")
                 return
             end
         end
@@ -4623,12 +4280,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 checkCount = checkCount + 1
                 if insideBG and not playerTracker.initialListCaptured and checkCount <= 15 then
                     if playerTracker.joinedInProgress then
-                        Debug("Periodic match start check: joinedInProgress true, skipping further checks")
                         return
                     end
 
                     if IsMatchStarted() then
-                        Debug("MATCH START DETECTED via periodic check (attempt " .. checkCount .. ")")
                         CaptureInitialPlayerList(false)
                     else
                         C_Timer.After(10, CheckMatchStart)
@@ -4640,7 +4295,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             end
             
         elseif not insideBG and wasInBG then
-            Debug("Left battleground, resetting flags")
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
@@ -4648,7 +4302,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             StopStatePersistence()
             ClearSessionState("left battleground")
         elseif not insideBG then
-            Debug("Player entering world outside BG, resetting flags")
             bgStartTime = 0
             matchSaved = false
             saveInProgress = false
@@ -4659,7 +4312,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
 
     elseif (e == "CHAT_MSG_BG_SYSTEM_NEUTRAL" or e == "CHAT_MSG_BG_SYSTEM_ALLIANCE" or e == "CHAT_MSG_BG_SYSTEM_HORDE") and insideBG then
         local message = ...
-        Debug("BG System message: " .. tostring(message))
         
         if message and not playerTracker.battleHasBegun then
             local lowerMsg = message:lower()
@@ -4679,11 +4331,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             
             if isBattleStartMessage and not isPreparationMessage then
                 playerTracker.battleHasBegun = true
-                Debug("*** BATTLE HAS BEGUN detected via chat message: " .. message .. " ***")
-                Debug("Battle begun flag set to true")
                 FlagStateDirty()
             elseif isPreparationMessage then
-                Debug("*** PREPARATION MESSAGE detected (ignoring): " .. message .. " ***")
             end
         end
         
@@ -4698,7 +4347,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                                  lowerMsg:find("horde wins"))
             
             if isEndMessage and timeSinceStart > MIN_BG_TIME then
-                Debug("End of BG detected via chat message: " .. message)
                 RequestBattlefieldScoreData()
                 C_Timer.After(2, function()
                     if not matchSaved then
@@ -4710,16 +4358,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
 
     elseif e == "PVP_MATCH_STATE_CHANGED" and insideBG then
         local matchState = ...
-        Debug("PVP_MATCH_STATE_CHANGED: " .. tostring(matchState))
-        Debug("*** BGLogger: PVP_MATCH_STATE_CHANGED event received ***")
-        Debug("Match state parameter: '" .. tostring(matchState) .. "'")
-        Debug("Inside BG: " .. tostring(insideBG))
-        Debug("Initial list captured: " .. tostring(playerTracker.initialListCaptured))
         
         local actualMatchState = matchState
         if not actualMatchState and C_PvP and C_PvP.GetActiveMatchState then
             actualMatchState = C_PvP.GetActiveMatchState()
-            Debug("Got match state from API: '" .. tostring(actualMatchState) .. "'")
         end
         
         if actualMatchState == "complete" or actualMatchState == "finished" or actualMatchState == "ended" or 
@@ -4727,7 +4369,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             if not matchSaved then
                 local timeSinceStart = GetTime() - bgStartTime
                 if timeSinceStart > MIN_BG_TIME then
-                    Debug("BG END DETECTED via PVP_MATCH_STATE_CHANGED")
                     RequestBattlefieldScoreData()
                     C_Timer.After(1, function()
                         AttemptSaveWithRetry("PVP_MATCH_STATE_CHANGED")
@@ -4738,16 +4379,11 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         end
 
         if not playerTracker.initialListCaptured then
-            Debug("*** PVP_MATCH_STATE_CHANGED detected, checking if match has truly started ***")
             
             C_Timer.After(8, function()
-                Debug("*** PVP_MATCH_STATE_CHANGED timer callback - checking match status ***")
-                Debug("Current insideBG: " .. tostring(insideBG))
-                Debug("Current initialListCaptured: " .. tostring(playerTracker.initialListCaptured))
 
                 local timeSinceStart = GetTime() - bgStartTime
                 if timeSinceStart >= 240 then
-                    Debug("*** SKIPPING initial capture: more than 240s since start ***")
                     return
                 end
                 
@@ -4755,37 +4391,21 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     local apiDuration = 0
                     if C_PvP and C_PvP.GetActiveMatchDuration then
                         apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                        Debug("API match duration: " .. apiDuration .. " seconds")
                         if apiDuration > 0 then
-                            Debug("*** BATTLE HAS BEGUN detected via API duration: " .. apiDuration .. "s ***")
                             playerTracker.battleHasBegun = true
-                            Debug("Battle begun flag set via API detection")
                             FlagStateDirty()
                         end
                     end
                     
                     local matchHasStarted = IsMatchStarted()
-                    Debug("Conservative match started validation: " .. tostring(matchHasStarted))
                     
                     local numPlayers = GetNumBattlefieldScores()
-                    Debug("Current player count: " .. numPlayers)
                     
                     if matchHasStarted then
-                        Debug("*** MATCH CONFIRMED STARTED - Calling CaptureInitialPlayerList ***")
-                        Debug("MATCH START CONFIRMED via conservative PVP_MATCH_STATE_CHANGED validation")
                         CaptureInitialPlayerList(IsEpicBattleground())
-                    else
-                        Debug("*** MATCH NOT YET STARTED - Conservative validation failed ***")
-                        Debug("  - Conservative IsMatchStarted() returned false")
                     end
-                else
-                    Debug("*** CONDITIONS NOT MET ***")
-                    if not insideBG then Debug("  - Not in BG anymore") end
-                    if playerTracker.initialListCaptured then Debug("  - Initial list already captured") end
                 end
             end)
-        else
-            Debug("*** Initial list already captured, ignoring this PVP_MATCH_STATE_CHANGED event ***")
         end
 
 
@@ -4797,7 +4417,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             local timeSinceStart = GetTime() - bgStartTime
             
             if bgStartTime == 0 or timeSinceStart < 0 or timeSinceStart > 7200 then
-                Debug("Invalid BG start time detected, resetting to now")
                 bgStartTime = GetTime()
                 timeSinceStart = 0
             end
@@ -4806,7 +4425,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 local winner = GetWinner and GetWinner() or nil
                 
                 if winner and winner ~= 0 and timeSinceStart > 120 then
-                    Debug("Winner detected (" .. winner .. ") after " .. timeSinceStart .. " seconds")
                     RequestBattlefieldScoreData()
                     C_Timer.After(3, function()
                         if not matchSaved then
@@ -4818,7 +4436,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         end
         
     elseif e == "PVP_MATCH_COMPLETE" and insideBG and not matchSaved then
-        Debug("PVP_MATCH_COMPLETE event detected")
         local timeSinceStart = GetTime() - bgStartTime
         
         if timeSinceStart > MIN_BG_TIME then
@@ -4833,12 +4450,9 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     
     elseif (e == "PLAYER_LEAVING_WORLD" or e == "ZONE_CHANGED_NEW_AREA") then
         if insideBG then
-            Debug("Leaving battleground event (" .. e .. ") while still in match - persisting state for reload/transition")
             PersistMatchState("leaving_world_event")
             StopStatePersistence()
             insideBG = false
-        else
-            Debug("Leaving world/zone (" .. e .. ") while not flagged inside BG - no active match to preserve")
         end
     end
 end)
@@ -4846,7 +4460,6 @@ end)
 function SaveExitingBattleground()
     if matchSaved then return end
     
-    Debug("SaveExitingBattleground called")
     
     RequestBattlefieldScoreData()
     
@@ -4854,19 +4467,14 @@ function SaveExitingBattleground()
         local data = CollectScoreData()
         
         if #data > 0 then
-            Debug("Got " .. #data .. " player records on exit, saving")
             CommitMatch(data)
         else
-            Debug("No player data on exit, trying one more time")
             
             RequestBattlefieldScoreData()
             C_Timer.After(1, function()
                 local finalData = CollectScoreData()
                 if #finalData > 0 then
-                    Debug("Final attempt: got " .. #finalData .. " player records")
                     CommitMatch(finalData)
-                else
-                    Debug("Still no player data, giving up")
                 end
             end)
         end
@@ -4879,9 +4487,6 @@ print("|cff00ffffBGLogger|r loaded successfully! Use |cffffffff/bglogger|r to op
 C_Timer.After(1, function()
     if BGLoggerDB.minimapButton ~= false then
         SetMinimapButtonShown(true)
-        Debug("Minimap button initialized and shown")
-    else
-        Debug("Minimap button disabled in settings")
     end
 end)
 
