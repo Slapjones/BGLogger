@@ -1,6 +1,7 @@
 BGLoggerDB = BGLoggerDB or {}
 BGLoggerSession = BGLoggerSession or {}
 BGLoggerAccountChars = BGLoggerAccountChars or {}
+BGLoggerCharStats = BGLoggerCharStats or {}
 
 ---------------------------------------------------------------------
 -- globals
@@ -457,6 +458,17 @@ local function GetLogSeason(data)
 	return NormalizeSeason(data.season)
 end
 
+local function IsEpicBattlegroundByName(mapName)
+	if not mapName or mapName == "" then return false end
+	local name = mapName:lower()
+	return name:find("alterac")
+		or name:find("isle of conquest")
+		or name:find("wintergrasp")
+		or name:find("ashran")
+		or name:find("slayer")
+		or false
+end
+
 local function GetBattlegroundCategory(data)
 	if not data then return "random" end
 
@@ -470,7 +482,8 @@ local function GetBattlegroundCategory(data)
 		return "rated"
 	end
 
-	if IsEpicBattleground() then
+	local mapName = data.battlegroundName or ""
+	if IsEpicBattlegroundByName(mapName) then
 		return "epic"
 	end
 
@@ -597,12 +610,20 @@ local function CollectSeasonNames()
 	local seen = {}
 	seen[CURRENT_SEASON] = true
 
+	-- Collect from logs
 	for _, data in pairs(BGLoggerDB) do
 		if type(data) == "table" and data.mapID and data.stats then
 			local season = GetLogSeason(data)
 			if season and not seen[season] then
 				seen[season] = true
 			end
+		end
+	end
+	
+	-- Also collect from persistent stats
+	for _, entry in pairs(BGLoggerCharStats) do
+		if entry.season and not seen[entry.season] then
+			seen[entry.season] = true
 		end
 	end
 
@@ -628,6 +649,8 @@ end
 
 local function CollectCharacterOptions()
 	local characters = {}
+	
+	-- Collect from logs
 	for _, data in pairs(BGLoggerDB) do
 		if type(data) == "table" and data.mapID and data.stats then
 			local logSeason = GetLogSeason(data)
@@ -644,6 +667,24 @@ local function CollectCharacterOptions()
 				if name and realm then
 					local key = string.format("%s-%s", name, realm)
 					characters[key] = { name = name, realm = realm }
+				end
+			end
+		end
+	end
+	
+	-- Also collect from persistent stats (for characters with stats but no logs)
+	for _, entry in pairs(BGLoggerCharStats) do
+		if entry.charKey then
+			local seasonMatches = ValueMatchesFilter(entry.season, filterState.seasons)
+			local bgTypeMatches = ValueMatchesFilter(entry.bgCategory, filterState.bgCategories)
+			local mapMatches = ValueMatchesFilter(entry.mapName, filterState.maps)
+			
+			if seasonMatches and bgTypeMatches and mapMatches then
+				if not characters[entry.charKey] then
+					local name, realm = ParsePlayerKey(entry.charKey)
+					if name and realm then
+						characters[entry.charKey] = { name = name, realm = realm }
+					end
 				end
 			end
 		end
@@ -665,6 +706,7 @@ local function CollectMapNames()
 	local maps = {}
 	local seen = {}
 
+	-- Collect from logs
 	for _, data in pairs(BGLoggerDB) do
 		if type(data) == "table" and data.mapID and data.stats then
 			local season = GetLogSeason(data)
@@ -694,13 +736,71 @@ local function CollectMapNames()
 			end
 		end
 	end
+	
+	-- Also collect from persistent stats
+	for _, entry in pairs(BGLoggerCharStats) do
+		if entry.mapName and not seen[entry.mapName] then
+			local seasonMatches = ValueMatchesFilter(entry.season, filterState.seasons)
+			local bgTypeMatches = ValueMatchesFilter(entry.bgCategory, filterState.bgCategories)
+			local charMatches = IsFilterEmpty(filterState.characters) or filterState.characters[entry.charKey]
+			
+			if seasonMatches and bgTypeMatches and charMatches then
+				seen[entry.mapName] = true
+				table.insert(maps, entry.mapName)
+			end
+		end
+	end
 
 	table.sort(maps)
 	return maps
 end
 
+---------------------------------------------------------------------
+-- Persistent Character Stats Helpers
+---------------------------------------------------------------------
+local function GetCharStatsKey(charKey, season, bgCategory, mapName)
+	return charKey .. "|" .. (season or CURRENT_SEASON) .. "|" .. (bgCategory or "random") .. "|" .. (mapName or "Unknown")
+end
+
+local function EnsureCharStatsEntry(charKey, season, bgCategory, mapName)
+	local statsKey = GetCharStatsKey(charKey, season, bgCategory, mapName)
+	if not BGLoggerCharStats[statsKey] then
+		BGLoggerCharStats[statsKey] = {
+			charKey = charKey,
+			season = season or CURRENT_SEASON,
+			bgCategory = bgCategory or "random",
+			mapName = mapName or "Unknown",
+			games = 0,
+			wins = 0,
+			losses = 0,
+			damage = 0,
+			healing = 0,
+			kills = 0,
+			deaths = 0,
+			honorableKills = 0,
+			objectives = 0,
+		}
+	end
+	return BGLoggerCharStats[statsKey]
+end
+
+local function AppendCharStats(charKey, season, bgCategory, mapName, playerEntry, didWin)
+	local entry = EnsureCharStatsEntry(charKey, season, bgCategory, mapName)
+	entry.games = entry.games + 1
+	if didWin == true then
+		entry.wins = entry.wins + 1
+	elseif didWin == false then
+		entry.losses = entry.losses + 1
+	end
+	entry.damage = entry.damage + (tonumber(playerEntry.damage) or tonumber(playerEntry.dmg) or 0)
+	entry.healing = entry.healing + (tonumber(playerEntry.healing) or tonumber(playerEntry.heal) or 0)
+	entry.kills = entry.kills + (playerEntry.kills or playerEntry.killingBlows or playerEntry.kb or 0)
+	entry.deaths = entry.deaths + (playerEntry.deaths or 0)
+	entry.honorableKills = entry.honorableKills + (playerEntry.honorableKills or 0)
+	entry.objectives = entry.objectives + (playerEntry.objectives or 0)
+end
+
 local function ComputeAccountStats()
-	local meName, meRealm = GetCurrentPlayerIdentity()
 	local totals = {
 		games = 0,
 		wins = 0,
@@ -710,58 +810,24 @@ local function ComputeAccountStats()
 		kills = 0,
 	}
 
-	for _, data in pairs(BGLoggerDB) do
-		if LogMatchesFilters(data) then
-			local targetName, targetRealm
-			local playerEntry = nil
+	for statsKey, entry in pairs(BGLoggerCharStats) do
+		local charKey = entry.charKey
+		local season = entry.season
+		local bgCategory = entry.bgCategory
+		local mapName = entry.mapName
 
-			if not IsFilterEmpty(filterState.characters) then
-				local candidates = GetRecorderKeys(data)
-				for _, candidateKey in ipairs(candidates) do
-					if filterState.characters[candidateKey] then
-						targetName, targetRealm = ParsePlayerKey(candidateKey)
-						playerEntry = FindSelfPlayerEntry(data, targetName, targetRealm)
-						if playerEntry then break end
-					end
-				end
-			else
-				local candidates = GetRecorderKeys(data)
-				if #candidates > 0 then
-					targetName, targetRealm = ParsePlayerKey(candidates[1])
-				else
-					targetName, targetRealm = GetSelfIdentityFromData(data)
-				end
-				
-				if targetName then
-					playerEntry = FindSelfPlayerEntry(data, targetName, targetRealm)
-				end
+		local seasonMatches = ValueMatchesFilter(season, filterState.seasons)
+		local charMatches = IsFilterEmpty(filterState.characters) or filterState.characters[charKey]
+		local bgTypeMatches = ValueMatchesFilter(bgCategory, filterState.bgCategories)
+		local mapMatches = ValueMatchesFilter(mapName, filterState.maps)
 
-				if not playerEntry then
-					playerEntry = FindSelfPlayerEntry(data, meName, meRealm)
-				end
-			end
-
-			if playerEntry then
-				totals.games = totals.games + 1
-
-				local dmg = playerEntry.damage or playerEntry.dmg or 0
-				local heal = playerEntry.healing or playerEntry.heal or 0
-				local kills = playerEntry.kills or playerEntry.killingBlows or playerEntry.kb or 0
-
-				totals.damage = totals.damage + dmg
-				totals.healing = totals.healing + heal
-				totals.kills = totals.kills + kills
-
-				local winner = data.winner
-				local faction = playerEntry.faction or playerEntry.side
-				if winner and faction then
-					if winner == faction then
-						totals.wins = totals.wins + 1
-					else
-						totals.losses = totals.losses + 1
-					end
-				end
-			end
+		if seasonMatches and charMatches and bgTypeMatches and mapMatches then
+			totals.games = totals.games + entry.games
+			totals.wins = totals.wins + entry.wins
+			totals.losses = totals.losses + entry.losses
+			totals.damage = totals.damage + entry.damage
+			totals.healing = totals.healing + entry.healing
+			totals.kills = totals.kills + entry.kills
 		end
 	end
 
@@ -2542,6 +2608,27 @@ local function CommitMatch(list)
             }
         }
         
+        -- Append to persistent character stats
+        local selfKey = GetPlayerKey(selfName, selfRealm)
+        local selfEntry = FindSelfPlayerEntry(BGLoggerDB[key], selfName, selfRealm)
+        if selfEntry then
+            local didWin = nil
+            if winner ~= "" then
+                didWin = (winner == selfFaction)
+            end
+            -- Compute bgCategory using same logic as GetBattlegroundCategory
+            local bgCategory
+            if bgType == "rated-blitz" then
+                bgCategory = "blitz"
+            elseif bgType == "rated" then
+                bgCategory = "rated"
+            elseif IsEpicBattlegroundByName(mapName) then
+                bgCategory = "epic"
+            else
+                bgCategory = "random"
+            end
+            AppendCharStats(selfKey, CURRENT_SEASON, bgCategory, mapName, selfEntry, didWin)
+        end
         
         matchSaved = true
         ClearSessionState("match saved")
@@ -2769,13 +2856,12 @@ function ShowJSONExportFrame(jsonString, filename)
         
         editBox:SetScript("OnChar", function() end)
         editBox:SetScript("OnKeyDown", function(self, key)
-            if key == "LCTRL" or key == "RCTRL" or
-               key == "C" or key == "A" or
-               key == "LEFT" or key == "RIGHT" or key == "UP" or key == "DOWN" or
-               key == "HOME" or key == "END" or key == "PAGEUP" or key == "PAGEDOWN" then
-                return
-            else
-                return
+            if key == "C" and IsControlKeyDown() then
+                C_Timer.After(0.1, function()
+                    if BGLoggerExportFrame then
+                        BGLoggerExportFrame:Hide()
+                    end
+                end)
             end
         end)
         

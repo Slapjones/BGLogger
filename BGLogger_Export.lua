@@ -100,6 +100,15 @@ function ShowJSONExportFrame(jsonString, filename)
 		editBox:SetScript("OnMouseUp", function(self)
 			self:HighlightText()
 		end)
+		editBox:SetScript("OnKeyDown", function(self, key)
+			if key == "C" and IsControlKeyDown() then
+				C_Timer.After(0.1, function()
+					if BGLoggerExportFrame then
+						BGLoggerExportFrame:Hide()
+					end
+				end)
+			end
+		end)
 		
 		scroll:SetScrollChild(editBox)
 		f.editBox = editBox
