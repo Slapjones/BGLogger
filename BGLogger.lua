@@ -4245,11 +4245,25 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 end
                 
                 if apiDuration > 10 then
-                    -- Match has started, user is a backfill
+                    -- Match well underway, user is a backfill
                     playerTracker.joinedInProgress = true
                     playerTracker.joinedInProgressReason = "no_saved_data_match_started"
+                elseif apiDuration > 0 then
+                    -- Match just started (0-10s), try to capture initial list now
+                    -- This handles reload right as match begins
+                    C_Timer.After(0.5, function()
+                        if not insideBG then return end
+                        if playerTracker.initialListCaptured then return end
+                        RequestBattlefieldScoreData()
+                        C_Timer.After(0.5, function()
+                            if not insideBG then return end
+                            if not playerTracker.initialListCaptured then
+                                CaptureInitialPlayerList(true)
+                            end
+                        end)
+                    end)
                 end
-                -- If match not started (apiDuration <= 10), normal flow continues below
+                -- If match not started (apiDuration == 0), normal flow continues below
                 -- to capture initial list when battle begins
                 
                 StartStatePersistence()
