@@ -246,39 +246,36 @@ local function TryRestoreMatchState()
     if not BGLoggerSession or not BGLoggerSession.activeMatch then
         return false
     end
-    if not insideBG then
-        return false
-    end
 
     local state = BGLoggerSession.activeMatch
+    
+    -- Only reject if data is very stale (15+ minutes old)
     local now = GetServerTime()
     if state.timestamp and (now - state.timestamp) > 900 then
         ClearSessionState("snapshot too old")
         return false
     end
-
-    local currentMap = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0
-    if state.mapID and state.mapID > 0 and currentMap and currentMap > 0 and currentMap ~= state.mapID then
-        ClearSessionState("map mismatch on restore")
+    
+    -- Check if the saved state has an initial player list worth restoring
+    if not state.playerTracker or not state.playerTracker.initialPlayerList then
+        return false
+    end
+    
+    local initialCount = 0
+    for _ in pairs(state.playerTracker.initialPlayerList) do
+        initialCount = initialCount + 1
+    end
+    if initialCount == 0 then
         return false
     end
 
-    local currentDuration = GetCurrentMatchDuration()
-    if state.matchDuration and state.matchDuration > 0 and currentDuration > 0 then
-        local diff = math.abs(currentDuration - state.matchDuration)
-        if diff > 900 then
-            ClearSessionState("duration mismatch on restore")
-            return false
-        end
-    end
-
+    -- Restore the state - trust the saved data
     playerTracker = DeepCopyTable(state.playerTracker) or playerTracker
     matchSaved = state.matchSaved or false
     saveInProgress = state.saveInProgress or false
     bgStartTime = state.bgStartTime or bgStartTime
 
     FlagStateDirty()
-
     return true
 end
 
@@ -4219,40 +4216,46 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     local wasInBG = insideBG
     insideBG = newBGStatus
     
+        -- Step 1: Not in BG? Clear saved state and wait
+        if not insideBG then
+            ClearSessionState("not_in_bg")
+            StopStatePersistence()
+            return
+        end
+        
+        -- Step 2: In BG - try to restore saved list data
         if insideBG and not wasInBG then
-            local hadSavedState = BGLoggerSession and BGLoggerSession.activeMatch ~= nil
             local restoredState = TryRestoreMatchState()
             
             if restoredState then
-                -- State restored successfully from saved session
+                -- Have saved list data - use it, proceed normally
+                StartStatePersistence()
             else
+                -- Step 3: No saved list data - check if match has started
                 bgStartTime = GetTime()
                 matchSaved = false
                 saveInProgress = false
                 ResetPlayerTracker()
                 initialPlayerCount = 0
                 
-                -- If we had a saved state but couldn't restore it, or if API shows
-                -- match running > 30s, this is a reload/DC - mark as joined in progress
-                if hadSavedState then
-                    playerTracker.joinedInProgress = true
-                    playerTracker.joinedInProgressReason = "restore_failed_had_saved_state"
-                else
-                    -- No saved state - check API duration as fallback
-                    local apiDuration = 0
-                    if C_PvP and C_PvP.GetActiveMatchDuration then
-                        apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                    end
-                    if apiDuration > 30 then
-                        playerTracker.joinedInProgress = true
-                        playerTracker.joinedInProgressReason = "reload_or_dc_api_duration"
-                    end
+                -- Check if match already started (backfill scenario)
+                local apiDuration = 0
+                if C_PvP and C_PvP.GetActiveMatchDuration then
+                    apiDuration = C_PvP.GetActiveMatchDuration() or 0
                 end
+                
+                if apiDuration > 10 then
+                    -- Match has started, user is a backfill
+                    playerTracker.joinedInProgress = true
+                    playerTracker.joinedInProgressReason = "no_saved_data_match_started"
+                end
+                -- If match not started (apiDuration <= 10), normal flow continues below
+                -- to capture initial list when battle begins
+                
+                StartStatePersistence()
             end
-
-            StartStatePersistence()
             
-            if not playerTracker.initialListCaptured then
+            if not playerTracker.initialListCaptured and not playerTracker.joinedInProgress then
             local function CheckInProgress(attempt)
                 attempt = attempt or 1
                 if not insideBG then return end
