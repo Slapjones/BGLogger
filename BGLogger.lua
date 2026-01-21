@@ -249,9 +249,9 @@ local function TryRestoreMatchState()
 
     local state = BGLoggerSession.activeMatch
     
-    -- Only reject if data is very stale (15+ minutes old)
+    -- Only reject if data is very stale (2+ hours old)
     local now = GetServerTime()
-    if state.timestamp and (now - state.timestamp) > 900 then
+    if state.timestamp and (now - state.timestamp) > 7200 then
         ClearSessionState("snapshot too old")
         return false
     end
