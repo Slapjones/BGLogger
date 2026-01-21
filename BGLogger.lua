@@ -4220,14 +4220,34 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     insideBG = newBGStatus
     
         if insideBG and not wasInBG then
+            local hadSavedState = BGLoggerSession and BGLoggerSession.activeMatch ~= nil
             local restoredState = TryRestoreMatchState()
+            
             if restoredState then
+                -- State restored successfully from saved session
             else
                 bgStartTime = GetTime()
                 matchSaved = false
                 saveInProgress = false
                 ResetPlayerTracker()
                 initialPlayerCount = 0
+                
+                -- If we had a saved state but couldn't restore it, or if API shows
+                -- match running > 30s, this is a reload/DC - mark as joined in progress
+                if hadSavedState then
+                    playerTracker.joinedInProgress = true
+                    playerTracker.joinedInProgressReason = "restore_failed_had_saved_state"
+                else
+                    -- No saved state - check API duration as fallback
+                    local apiDuration = 0
+                    if C_PvP and C_PvP.GetActiveMatchDuration then
+                        apiDuration = C_PvP.GetActiveMatchDuration() or 0
+                    end
+                    if apiDuration > 30 then
+                        playerTracker.joinedInProgress = true
+                        playerTracker.joinedInProgressReason = "reload_or_dc_api_duration"
+                    end
+                end
             end
 
             StartStatePersistence()
