@@ -23,7 +23,7 @@ local MIN_BG_TIME            = 30
 local saveInProgress         = false
 local pendingRefresh         = false
 
-local CURRENT_SEASON         = "tww-s3"
+local CURRENT_SEASON         = "mntpp"
 local UNKNOWN_SEASON         = "Unspecified"
 
 local filterState = {
@@ -443,6 +443,9 @@ local function NormalizeSeason(season)
 		["Season 1"] = "tww-s3",
 		["season 1"] = "tww-s3",
 		["S1"] = "tww-s3",
+		["MNTPP"] = "mntpp",
+		["Midnight Prepatch"] = "mntpp",
+		["midnight prepatch"] = "mntpp",
 	}
 	
 	local normalized = legacyMapping[season]
@@ -910,6 +913,9 @@ end
 
 
 local SEASON_DISPLAY_NAMES = {
+	["mntpp"] = "Midnight Prepatch",
+	["MNTPP"] = "Midnight Prepatch",
+	["Midnight Prepatch"] = "Midnight Prepatch",
 	["tww-s3"] = "TWW Season 3",
 	["Season 1"] = "TWW Season 3",
 	["Unspecified"] = "TWW Season 3",
