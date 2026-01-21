@@ -3836,8 +3836,6 @@ local function CreateWindow()
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", f.StopMovingOrSizing)
     
-    f:SetPropagateKeyboardInput(true)
-    f:EnableKeyboard(true)
     f:SetScript("OnKeyDown", function(self, key)
         if key == "ESCAPE" then
             self:Hide()
@@ -3845,11 +3843,15 @@ local function CreateWindow()
     end)
     
     f:SetScript("OnShow", function(self)
-        self:EnableKeyboard(true)
+        if not InCombatLockdown() then
+            self:EnableKeyboard(true)
+        end
     end)
     
     f:SetScript("OnHide", function(self)
-        self:EnableKeyboard(false)
+        if not InCombatLockdown() then
+            self:EnableKeyboard(false)
+        end
     end)
     
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
