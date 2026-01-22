@@ -211,6 +211,13 @@ local function PersistMatchState(reason)
     if not BGLoggerSession then
         return
     end
+    
+    local initialCount = 0
+    if playerTracker.initialPlayerList then
+        for _ in pairs(playerTracker.initialPlayerList) do
+            initialCount = initialCount + 1
+        end
+    end
 
     local snapshot = {
         timestamp = GetServerTime(),
@@ -224,6 +231,10 @@ local function PersistMatchState(reason)
 
     BGLoggerSession.activeMatch = snapshot
     stateDirty = false
+    
+    if reason == "leaving_world_event" then
+        print("|cff00ffffBGLogger:|r Persisted state on leaving world - initialCount:", initialCount, "initialListCaptured:", playerTracker.initialListCaptured)
+    end
 end
 
 local function StartStatePersistence()
@@ -244,6 +255,7 @@ end
 
 local function TryRestoreMatchState()
     if not BGLoggerSession or not BGLoggerSession.activeMatch then
+        print("|cff00ffffBGLogger:|r TryRestore: no activeMatch")
         return false
     end
 
@@ -252,12 +264,14 @@ local function TryRestoreMatchState()
     -- Only reject if data is very stale (2+ hours old)
     local now = GetServerTime()
     if state.timestamp and (now - state.timestamp) > 7200 then
+        print("|cff00ffffBGLogger:|r TryRestore: state too old")
         ClearSessionState("snapshot too old")
         return false
     end
     
     -- Check if the saved state has an initial player list worth restoring
     if not state.playerTracker or not state.playerTracker.initialPlayerList then
+        print("|cff00ffffBGLogger:|r TryRestore: no playerTracker or initialPlayerList")
         return false
     end
     
@@ -266,10 +280,12 @@ local function TryRestoreMatchState()
         initialCount = initialCount + 1
     end
     if initialCount == 0 then
+        print("|cff00ffffBGLogger:|r TryRestore: initialPlayerList is empty")
         return false
     end
 
     -- Restore the state - trust the saved data
+    print("|cff00ffffBGLogger:|r TryRestore: restoring with", initialCount, "players, initialListCaptured:", state.playerTracker.initialListCaptured)
     playerTracker = DeepCopyTable(state.playerTracker) or playerTracker
     matchSaved = state.matchSaved or false
     saveInProgress = state.saveInProgress or false
@@ -4225,10 +4241,22 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         
         -- Step 2: In BG - try to restore saved list data
         if insideBG and not wasInBG then
+            local hasSavedState = BGLoggerSession and BGLoggerSession.activeMatch ~= nil
+            local hasInitialList = hasSavedState and BGLoggerSession.activeMatch.playerTracker and BGLoggerSession.activeMatch.playerTracker.initialPlayerList
+            local initialCount = 0
+            if hasInitialList then
+                for _ in pairs(BGLoggerSession.activeMatch.playerTracker.initialPlayerList) do
+                    initialCount = initialCount + 1
+                end
+            end
+            print("|cff00ffffBGLogger:|r Restore check - hasSavedState:", hasSavedState, "hasInitialList:", hasInitialList, "count:", initialCount)
+            
             local restoredState = TryRestoreMatchState()
+            print("|cff00ffffBGLogger:|r Restore result:", restoredState)
             
             if restoredState then
                 -- Have saved list data - use it, proceed normally
+                print("|cff00ffffBGLogger:|r State restored successfully, initialListCaptured:", playerTracker.initialListCaptured)
                 StartStatePersistence()
             else
                 -- Step 3: No saved list data - check if match has started
