@@ -12,6 +12,7 @@ local RefreshWindow
 local RequestRefreshWindow
 local RefreshSeasonDropdown, RefreshCharacterDropdown, RefreshBgTypeDropdown, RefreshMapDropdown
 local IsEpicBattleground
+local playerTracker
 
 local LINE_HEIGHT            = 20
 local BUTTON_HEIGHT          = LINE_HEIGHT * 2 + 4
@@ -22,6 +23,7 @@ local bgStartTime            = 0
 local MIN_BG_TIME            = 30
 local saveInProgress         = false
 local pendingRefresh         = false
+local pendingEnterWorldRecheck = 0
 
 local CURRENT_SEASON         = "mntpp"
 local UNKNOWN_SEASON         = "Unspecified"
@@ -202,6 +204,34 @@ local function FlagStateDirty()
     end
 end
 
+local function SaveActiveMatchSnapshot()
+    if not BGLoggerSession or not playerTracker then
+        return false
+    end
+
+    local initialCount = 0
+    if playerTracker.initialPlayerList then
+        for _ in pairs(playerTracker.initialPlayerList) do
+            initialCount = initialCount + 1
+        end
+    end
+    if initialCount == 0 then
+        return false
+    end
+
+    BGLoggerSession.activeMatch = {
+        timestamp = GetServerTime(),
+        mapID = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0,
+        matchDuration = GetCurrentMatchDuration(),
+        playerTracker = DeepCopyTable(playerTracker),
+        matchSaved = matchSaved,
+        saveInProgress = saveInProgress,
+        bgStartTime = bgStartTime
+    }
+
+    return true
+end
+
 local function PersistMatchState(reason)
     if not insideBG then
         ClearSessionState(reason or "not in BG")
@@ -212,29 +242,12 @@ local function PersistMatchState(reason)
         return
     end
     
-    local initialCount = 0
-    if playerTracker.initialPlayerList then
-        for _ in pairs(playerTracker.initialPlayerList) do
-            initialCount = initialCount + 1
-        end
+    if not playerTracker then
+        return
     end
 
-    local snapshot = {
-        timestamp = GetServerTime(),
-        mapID = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0,
-        matchDuration = GetCurrentMatchDuration(),
-        playerTracker = DeepCopyTable(playerTracker),
-        matchSaved = matchSaved,
-        saveInProgress = saveInProgress,
-        bgStartTime = bgStartTime
-    }
-
-    BGLoggerSession.activeMatch = snapshot
+    SaveActiveMatchSnapshot()
     stateDirty = false
-    
-    if reason == "leaving_world_event" then
-        print("|cff00ffffBGLogger:|r Persisted state on leaving world - initialCount:", initialCount, "initialListCaptured:", playerTracker.initialListCaptured)
-    end
 end
 
 local function StartStatePersistence()
@@ -255,23 +268,20 @@ end
 
 local function TryRestoreMatchState()
     if not BGLoggerSession or not BGLoggerSession.activeMatch then
-        print("|cff00ffffBGLogger:|r TryRestore: no activeMatch")
         return false
     end
 
     local state = BGLoggerSession.activeMatch
     
-    -- Only reject if data is very stale (2+ hours old)
+    -- Only reject if data is very stale (15+ minutes old)
     local now = GetServerTime()
-    if state.timestamp and (now - state.timestamp) > 7200 then
-        print("|cff00ffffBGLogger:|r TryRestore: state too old")
+    if state.timestamp and (now - state.timestamp) > 900 then
         ClearSessionState("snapshot too old")
         return false
     end
     
     -- Check if the saved state has an initial player list worth restoring
     if not state.playerTracker or not state.playerTracker.initialPlayerList then
-        print("|cff00ffffBGLogger:|r TryRestore: no playerTracker or initialPlayerList")
         return false
     end
     
@@ -280,16 +290,16 @@ local function TryRestoreMatchState()
         initialCount = initialCount + 1
     end
     if initialCount == 0 then
-        print("|cff00ffffBGLogger:|r TryRestore: initialPlayerList is empty")
         return false
     end
 
     -- Restore the state - trust the saved data
-    print("|cff00ffffBGLogger:|r TryRestore: restoring with", initialCount, "players, initialListCaptured:", state.playerTracker.initialListCaptured)
     playerTracker = DeepCopyTable(state.playerTracker) or playerTracker
     matchSaved = state.matchSaved or false
     saveInProgress = state.saveInProgress or false
     bgStartTime = state.bgStartTime or bgStartTime
+    playerTracker.restoredFromSnapshot = true
+    playerTracker.initialListCaptured = true
 
     FlagStateDirty()
     return true
@@ -1356,11 +1366,14 @@ local ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap
 ---------------------------------------------------------------------
 -- Simple Player List Tracking
 ---------------------------------------------------------------------
-local playerTracker = {
+playerTracker = {
     initialPlayerList = {},
     finalPlayerList = {},
     initialListCaptured = false,
     battleHasBegun = false,
+    initialCaptureAttempts = 0,
+    initialFactionRetries = 0,
+    restoredFromSnapshot = false,
 }
 
 local function CountTableEntries(tbl)
@@ -1379,6 +1392,9 @@ local function ResetPlayerTracker()
         playerTracker.initialCaptureRetried = false
         playerTracker.firstAttemptStats = nil
         playerTracker.battleHasBegun = false
+        playerTracker.initialCaptureAttempts = 0
+        playerTracker.initialFactionRetries = 0
+        playerTracker.restoredFromSnapshot = false
         playerTracker.detectedAFKers = {}
         playerTracker.joinedInProgress = false
         playerTracker.playerJoinedInProgress = false
@@ -1390,6 +1406,49 @@ end
 
 local function GetPlayerKey(name, realm)
     return (name or "Unknown") .. "-" .. (realm or "Unknown")
+end
+
+local function GetPlayerListKey(name, realm, guid)
+    if guid and guid ~= "" then
+        return "GUID-" .. guid
+    end
+    return GetPlayerKey(name, realm)
+end
+
+local function IsPlayerInInitialList(name, realm, guid, faction)
+    if not playerTracker or not playerTracker.initialPlayerList then
+        return false
+    end
+    local normalizedName = name or "Unknown"
+    local normalizedRealm = NormalizeRealmName(realm)
+    local key = GetPlayerListKey(normalizedName, normalizedRealm, guid)
+    if playerTracker.initialPlayerList[key] then
+        return true
+    end
+    local fallbackKey = GetPlayerKey(normalizedName, normalizedRealm)
+    if playerTracker.initialPlayerList[fallbackKey] then
+        return true
+    end
+    if guid and guid ~= "" then
+        local guidKey = "GUID-" .. guid
+        if playerTracker.initialPlayerList[guidKey] then
+            return true
+        end
+    end
+    for _, info in pairs(playerTracker.initialPlayerList) do
+        if info and info.name == normalizedName then
+            local infoRealm = NormalizeRealmName(info.realm)
+            if infoRealm == normalizedRealm then
+                return true
+            end
+            if infoRealm == "Unknown-Realm" or normalizedRealm == "Unknown-Realm" then
+                if not faction or not info.faction or info.faction == faction then
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 IsEpicBattleground = function()
@@ -1412,6 +1471,34 @@ local function CountFactionsInTable(playerTable)
         elseif p and p.faction == "Horde" then hordeCount = hordeCount + 1 end
     end
     return allianceCount, hordeCount
+end
+
+local function ResolveFactionIdFromScoreInfo(scoreInfo)
+    if not scoreInfo then return nil end
+    local factionId = scoreInfo.faction
+    if factionId == nil then
+        local side = scoreInfo.side
+        if type(side) == "number" then
+            factionId = side
+        elseif type(side) == "string" then
+            if side == "Horde" then
+                factionId = 0
+            elseif side == "Alliance" then
+                factionId = 1
+            end
+        end
+    end
+    return factionId
+end
+
+local function ResolveFactionNameFromScoreInfo(scoreInfo)
+    local factionId = ResolveFactionIdFromScoreInfo(scoreInfo)
+    if factionId == 0 then
+        return "Horde"
+    elseif factionId == 1 then
+        return "Alliance"
+    end
+    return nil
 end
 
 local function FixedWidthCenter(text, width)
@@ -1811,71 +1898,38 @@ local function GetObjectiveColumns(battlegroundName, playerDataList)
     return activeColumns
 end
 
-local initialPlayerCount = 0
-
 local function IsMatchStarted()
     local rows = GetNumBattlefieldScores()
     if rows == 0 then 
 		return false
     end
     
-    if not playerTracker.battleHasBegun then
-        return false
-    end
-    
     local apiDuration = 0
     if C_PvP and C_PvP.GetActiveMatchDuration then
         apiDuration = C_PvP.GetActiveMatchDuration() or 0
-        
-        if apiDuration > 5 then
-            return true
-        elseif apiDuration == 0 then
-            return false
+        if apiDuration > 0 and not playerTracker.battleHasBegun then
+            playerTracker.battleHasBegun = true
+            FlagStateDirty()
+        end
+    end
+
+    if apiDuration == 0 and GetBattlefieldInstanceRunTime then
+        apiDuration = math.floor((GetBattlefieldInstanceRunTime() or 0) / 1000)
+        if apiDuration > 0 and not playerTracker.battleHasBegun then
+            playerTracker.battleHasBegun = true
+            FlagStateDirty()
         end
     end
     
-    local allianceCount, hordeCount = 0, 0
-    
-    for i = 1, math.min(rows, 20) do
-        local success, s = pcall(C_PvP.GetScoreInfo, i)
-        if success and s and s.name then
-            local faction = nil
-            
-            if s.faction == 0 then
-                faction = "Horde"
-            elseif s.faction == 1 then
-                faction = "Alliance"
-            elseif s.side == "Alliance" or s.side == "Horde" then
-                faction = s.side
-            elseif s.side == 0 then
-                faction = "Horde"
-            elseif s.side == 1 then
-                faction = "Alliance"
-            end
-            
-            if faction == "Alliance" then
-                allianceCount = allianceCount + 1
-            elseif faction == "Horde" then
-                hordeCount = hordeCount + 1
-            end
-        end
+    if apiDuration > 0 then
+        return true
     end
-    
-    local bothFactionsVisible = (allianceCount > 0 and hordeCount > 0)
-    local hasMinimumPlayers = (rows >= (IsEpicBattleground() and 10 or 15))
-    
-    local timeSinceEntered = GetTime() - bgStartTime
-    local minimumWaitTime = IsEpicBattleground() and 20 or 45
-    
-    
-    local matchStarted = playerTracker.battleHasBegun and 
-                        apiDuration > 0 and 
-                        bothFactionsVisible and 
-                        hasMinimumPlayers and
-                        timeSinceEntered >= minimumWaitTime
-    
-    
-    return matchStarted
+
+    if playerTracker.battleHasBegun then
+        return true
+    end
+
+    return false
 end
 
 local function CaptureInitialPlayerList(skipMatchStartCheck)
@@ -1894,6 +1948,19 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     if rows == 0 then 
         return 
     end
+
+    playerTracker.initialCaptureAttempts = (playerTracker.initialCaptureAttempts or 0) + 1
+    local minRows = IsEpicBattleground() and 12 or 8
+    local maxAttempts = IsEpicBattleground() and 6 or 4
+    if not playerTracker.joinedInProgress and rows < minRows and playerTracker.initialCaptureAttempts < maxAttempts then
+        RequestBattlefieldScoreData()
+        C_Timer.After(2, function()
+            if insideBG and not playerTracker.initialListCaptured then
+                CaptureInitialPlayerList(true)
+            end
+        end)
+        return
+    end
     
     
     playerTracker.initialPlayerList = {}
@@ -1905,7 +1972,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     
     local processedCount = 0
     local skippedCount = 0
-    local keyCollisions = {}
     
     for i = 1, rows do
         local success, s = pcall(C_PvP.GetScoreInfo, i)
@@ -1937,11 +2003,10 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
             
             realmName = realmName:gsub("%s+", ""):gsub("'", "")
             
-            local playerKey = GetPlayerKey(playerName, realmName)
+            local playerGuid = s.guid
+            local playerKey = GetPlayerListKey(playerName, realmName, playerGuid)
             
             if playerTracker.initialPlayerList[playerKey] then
-                keyCollisions[playerKey] = (keyCollisions[playerKey] or 0) + 1
-                
                 local uniqueKey = playerKey .. "_" .. i
                 playerKey = uniqueKey
             end
@@ -1971,18 +2036,12 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 className = "Unknown"
             end
             
-            local factionName = ""
-            if s.faction == 0 then
-                factionName = "Horde"
-            elseif s.faction == 1 then
-                factionName = "Alliance"
-            else
-                factionName = (s.faction == 0) and "Horde" or "Alliance"
-            end
+            local factionName = ResolveFactionNameFromScoreInfo(s)
             
             playerTracker.initialPlayerList[playerKey] = {
                 name = playerName,
                 realm = realmName,
+                guid = playerGuid,
                 class = className,
                 spec = specName,
                 faction = factionName,
@@ -2000,22 +2059,10 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     
     local initialCount = CountTableEntries(playerTracker.initialPlayerList)
     
-    
-    if next(keyCollisions) then
-        for key, count in pairs(keyCollisions) do
-        end
-    end
-    
     local completenessRatio = rows > 0 and (processedCount / rows) or 0
     local isLargeDisparity = skippedCount > 15 and completenessRatio < 0.7
     
     local isEpicMap = IsEpicBattleground()
-    local currentMap = C_Map.GetBestMapForUnit("player") or 0
-    local mapInfo = C_Map.GetMapInfo(currentMap)
-    local mapName = (mapInfo and mapInfo.name) or "Unknown"
-    
-    if isEpicMap then
-    end
     
     if isLargeDisparity and not playerTracker.initialCaptureRetried then
         local retryDelay = isEpicMap and 25 or 12
@@ -2054,39 +2101,17 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         playerTracker.firstAttemptStats = nil
     end
     
-    if IsEpicBattleground() then
-        local aCount, hCount = CountFactionsInTable(playerTracker.initialPlayerList)
-        if (aCount == 0 or hCount == 0) and not playerTracker.initialCaptureRetried then
-            playerTracker.initialCaptureRetried = true
+    local aCount, hCount = CountFactionsInTable(playerTracker.initialPlayerList)
+    if not playerTracker.joinedInProgress and (aCount == 0 or hCount == 0) then
+        local maxFactionRetries = IsEpicBattleground() and 6 or 4
+        local retryDelay = IsEpicBattleground() and 4 or 2
+        if (playerTracker.initialFactionRetries or 0) < maxFactionRetries then
+            playerTracker.initialFactionRetries = (playerTracker.initialFactionRetries or 0) + 1
             RequestBattlefieldScoreData()
-            C_Timer.After(1.5, function()
-                if insideBG then
-                    local beforeCount = CountTableEntries(playerTracker.initialPlayerList)
-                    local rows2 = GetNumBattlefieldScores()
-                    for i = 1, rows2 do
-                        local ok, s2 = pcall(C_PvP.GetScoreInfo, i)
-                        if ok and s2 and s2.name and s2.name ~= "" then
-                            local pn, rn = s2.name, ""
-                            if s2.name:find("-") then pn, rn = s2.name:match("^(.+)-(.+)$") end
-                            if (not rn or rn == "") and s2.realm then rn = s2.realm end
-                            if (not rn or rn == "") and s2.guid then
-                                local _, _, _, _, _, _, _, rFrom = GetPlayerInfoByGUID(s2.guid)
-                                if rFrom and rFrom ~= "" then rn = rFrom end
-                            end
-                            if not rn or rn == "" then rn = GetRealmName() or "Unknown-Realm" end
-                            rn = rn:gsub("%s+", ""):gsub("'", "")
-                            local key = GetPlayerKey(pn, rn)
-                            if not playerTracker.initialPlayerList[key] then
-                                local factionName = (s2.faction == 1) and "Alliance" or ((s2.faction == 0) and "Horde" or (s2.side == 1 and "Alliance" or (s2.side == 0 and "Horde" or "")))
-                                playerTracker.initialPlayerList[key] = { name = pn, realm = rn, faction = factionName }
-                            end
-                        end
-                    end
-                    local afterCount = CountTableEntries(playerTracker.initialPlayerList)
+            C_Timer.After(retryDelay, function()
+                if insideBG and not playerTracker.initialListCaptured then
+                    CaptureInitialPlayerList(true)
                 end
-                playerTracker.initialListCaptured = true
-                FlagStateDirty()
-                PersistMatchState("initial_capture_epic_refresh")
             end)
             return
         end
@@ -2094,55 +2119,22 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
 
     playerTracker.initialListCaptured = true
     
-    local count = 0
-    for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
-        if count < 3 then
-            count = count + 1
-        end
-    end
     FlagStateDirty()
     PersistMatchState("initial_capture")
 end
 
 local function CaptureFinalPlayerList(playerStats)
-    
-    local currentPlayerName = UnitName("player")
-    local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
-    local currentPlayerKey = GetPlayerKey(currentPlayerName, currentPlayerRealm)
-    
-    
-    local foundCurrentPlayer = false
-    
     playerTracker.finalPlayerList = {}
     
     for i, player in ipairs(playerStats) do
         
-        local playerKey = GetPlayerKey(player.name, player.realm)
-        
-        if player.name == currentPlayerName then
-            foundCurrentPlayer = true
-        end
-        
-        if playerKey == currentPlayerKey then
-            foundCurrentPlayer = true
-        end
+        local playerKey = GetPlayerListKey(player.name, player.realm, player.guid)
         
         playerTracker.finalPlayerList[playerKey] = {
             name = player.name,
             realm = player.realm,
             playerData = player
         }
-    end
-    
-    
-    
-    local finalCount = CountTableEntries(playerTracker.finalPlayerList)
-    
-    local count = 0
-    for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
-        if count < 3 then
-            count = count + 1
-        end
     end
     FlagStateDirty()
     PersistMatchState("final_capture")
@@ -2158,9 +2150,6 @@ local function AnalyzePlayerLists()
     local finalCount = CountTableEntries(playerTracker.finalPlayerList)
     
     
-    if initialCount == 0 then
-    end
-    
     if finalCount == 0 then
         return afkers, backfills, normal
     end
@@ -2175,17 +2164,36 @@ local function AnalyzePlayerLists()
         
         
     else
-        
-        for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
-            if not playerTracker.finalPlayerList[playerKey] then
+        local finalKeys = {}
+        local finalNamesByFaction = {}
+        for _, playerInfo in pairs(playerTracker.finalPlayerList) do
+            local playerData = playerInfo.playerData
+            if playerData then
+                local realm = NormalizeRealmName(playerData.realm)
+                finalKeys[GetPlayerListKey(playerData.name, realm, playerData.guid)] = true
+                finalKeys[GetPlayerKey(playerData.name, realm)] = true
+                local faction = playerData.faction or ""
+                finalNamesByFaction[faction] = finalNamesByFaction[faction] or {}
+                finalNamesByFaction[faction][playerData.name] = true
+            end
+        end
+
+        for _, playerInfo in pairs(playerTracker.initialPlayerList) do
+            local realm = NormalizeRealmName(playerInfo.realm)
+            local initialKey = GetPlayerListKey(playerInfo.name, realm, playerInfo.guid)
+            local foundInFinal = finalKeys[initialKey] or finalKeys[GetPlayerKey(playerInfo.name, realm)]
+            if not foundInFinal and (realm == "Unknown-Realm") then
+                local faction = playerInfo.faction or ""
+                foundInFinal = finalNamesByFaction[faction] and finalNamesByFaction[faction][playerInfo.name]
+            end
+            if not foundInFinal then
                 table.insert(afkers, playerInfo)
             end
         end
-        
-        for playerKey, playerInfo in pairs(playerTracker.finalPlayerList) do
+
+        for _, playerInfo in pairs(playerTracker.finalPlayerList) do
             local playerData = playerInfo.playerData
-            
-            if playerTracker.initialPlayerList[playerKey] then
+            if IsPlayerInInitialList(playerData.name, playerData.realm, playerData.guid, playerData.faction) then
                 table.insert(normal, playerData)
             else
                 table.insert(backfills, playerData)
@@ -2195,21 +2203,22 @@ local function AnalyzePlayerLists()
     end
     
     local playerName = UnitName("player")
-    local playerRealm = GetRealmName() or "Unknown-Realm"
-    local yourKey = GetPlayerKey(playerName, playerRealm)
+    local playerRealm = NormalizeRealmName(GetRealmName() or "Unknown-Realm")
+    local playerGuid = UnitGUID("player")
+    local yourKey = GetPlayerListKey(playerName, playerRealm, playerGuid)
     
     
     local yourStatus = "UNKNOWN"
     if playerTracker.joinedInProgress then
         yourStatus = "JOINED IN-PROGRESS (participation status unknown)"
     elseif playerTracker.finalPlayerList[yourKey] then
-        if playerTracker.initialPlayerList[yourKey] then
+        if IsPlayerInInitialList(playerName, playerRealm, playerGuid) then
             yourStatus = "NORMAL (in initial, on final)"
         else
             yourStatus = "BACKFILL (NOT in initial, on final)"
         end
     else
-        if playerTracker.initialPlayerList[yourKey] then
+        if IsPlayerInInitialList(playerName, playerRealm, playerGuid) then
             yourStatus = "AFKer (in initial, NOT on final)"
         else
             yourStatus = "ERROR: Not in either list!"
@@ -2285,28 +2294,18 @@ local function NormalizeBattlegroundName(mapName)
 end
 
 local function CollectScoreData(attemptNumber)
-    attemptNumber = attemptNumber or 1
     local t, rows = {}, GetNumBattlefieldScores()
     
     if rows == 0 then
         return {}
     end
     
-    local currentPlayerName = UnitName("player")
-    local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
-    currentPlayerRealm = currentPlayerRealm:gsub("%s+", ""):gsub("'", "")
-    local foundCurrentPlayer = false
-    
     local playerRealm = GetBestRealmName()
-    local successfulReads = 0
-    local failedReads = 0
     
     for i = 1, rows do
         local success, s = pcall(C_PvP.GetScoreInfo, i)
         
         if success and s and s.name then
-            successfulReads = successfulReads + 1
-            
             local playerName, realmName = s.name, ""
             
             if s.name:find("-") then
@@ -2355,18 +2354,7 @@ local function CollectScoreData(attemptNumber)
                 className = "Unknown"
             end
             
-            local factionName = ""
-            if s.faction == 0 then
-                factionName = "Horde"
-            elseif s.faction == 1 then
-                factionName = "Alliance"
-            else
-                factionName = (s.faction == 0) and "Horde" or "Alliance"
-            end
-            
-            if playerName == currentPlayerName then
-                foundCurrentPlayer = true
-            end
+            local factionName = ResolveFactionNameFromScoreInfo(s)
             
             local rawDamage = s.damageDone or s.damage or 0
             local rawHealing = s.healingDone or s.healing or 0
@@ -2379,6 +2367,7 @@ local function CollectScoreData(attemptNumber)
             local playerData = {
                 name = playerName,
                 realm = realmName,
+                guid = s.guid,
                 faction = factionName,
                 class = className,
                 spec = specName,
@@ -2394,22 +2383,27 @@ local function CollectScoreData(attemptNumber)
             }
             
             t[#t+1] = playerData
-        else
-            failedReads = failedReads + 1
         end
     end
      
     
+    local finalKeys = {}
+    for _, finalPlayer in ipairs(t) do
+        local finalKey = GetPlayerListKey(finalPlayer.name, finalPlayer.realm, finalPlayer.guid)
+        finalKeys[finalKey] = true
+        if finalPlayer.guid and finalPlayer.guid ~= "" then
+            local fallbackKey = GetPlayerKey(finalPlayer.name, finalPlayer.realm)
+            finalKeys[fallbackKey] = true
+        end
+    end
+
     local afkers = {}
     if not playerTracker.joinedInProgress then
         for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
-            local foundInFinal = false
-            for _, finalPlayer in ipairs(t) do
-                local finalPlayerKey = GetPlayerKey(finalPlayer.name, finalPlayer.realm)
-                if finalPlayerKey == playerKey then
-                    foundInFinal = true
-                    break
-                end
+            local foundInFinal = finalKeys[playerKey]
+            if not foundInFinal and playerInfo and playerInfo.guid and playerInfo.guid ~= "" then
+                local fallbackKey = GetPlayerKey(playerInfo.name, playerInfo.realm)
+                foundInFinal = finalKeys[fallbackKey]
             end
             
             if not foundInFinal then
@@ -2426,14 +2420,15 @@ local function CollectScoreData(attemptNumber)
     end
     
     for _, player in ipairs(t) do
-        local playerKey = GetPlayerKey(player.name, player.realm)
+        local playerKey = GetPlayerListKey(player.name, player.realm, player.guid)
         
         if playerTracker.joinedInProgress then
-            local isCurrent = (player.name == currentPlayerName and player.realm == currentPlayerRealm)
+            local isCurrent = (player.guid and currentPlayerGuid and player.guid == currentPlayerGuid)
+                or (player.name == currentPlayerName and player.realm == currentPlayerRealm)
             player.isBackfill = isCurrent
             player.participationUnknown = not isCurrent
         else
-            if not playerTracker.initialPlayerList[playerKey] then
+            if not IsPlayerInInitialList(player.name, player.realm, player.guid, player.faction) then
                 player.isBackfill = true
             else
                 player.isBackfill = false
@@ -4197,6 +4192,7 @@ local Driver = CreateFrame("Frame")
 Driver:RegisterEvent("PLAYER_ENTERING_WORLD")
 Driver:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
 Driver:RegisterEvent("PLAYER_LEAVING_WORLD")
+Driver:RegisterEvent("PLAYER_LOGOUT")
 Driver:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 Driver:RegisterEvent("CHAT_MSG_BG_SYSTEM_NEUTRAL")
 Driver:RegisterEvent("PLAYER_REGEN_ENABLED")
@@ -4215,244 +4211,265 @@ for _, eventName in ipairs(additionalEvents) do
     end)
 end
 
+local function HandleEnterBattleground(wasInBG)
+    if not insideBG or wasInBG then
+        return
+    end
+
+    local restoredState = TryRestoreMatchState()
+    
+    if restoredState then
+        -- Have saved list data - use it, proceed normally
+        StartStatePersistence()
+    else
+        -- Step 3: No saved list data - check if match has started
+        bgStartTime = GetTime()
+        matchSaved = false
+        saveInProgress = false
+        ResetPlayerTracker()
+        
+        -- Check if match already started (backfill scenario)
+        local apiDuration = 0
+        if C_PvP and C_PvP.GetActiveMatchDuration then
+            apiDuration = C_PvP.GetActiveMatchDuration() or 0
+        end
+        
+        if apiDuration > 10 then
+            -- Match well underway, user is a backfill
+            playerTracker.joinedInProgress = true
+            playerTracker.joinedInProgressReason = "no_saved_data_match_started"
+        elseif apiDuration > 0 then
+            -- Match just started (0-10s), try to capture initial list now
+            -- This handles reload right as match begins
+            C_Timer.After(0.5, function()
+                if not insideBG then return end
+                if playerTracker.initialListCaptured then return end
+                RequestBattlefieldScoreData()
+                C_Timer.After(0.5, function()
+                    if not insideBG then return end
+                    if not playerTracker.initialListCaptured then
+                        CaptureInitialPlayerList(true)
+                    end
+                end)
+            end)
+        end
+        -- If match not started (apiDuration == 0), normal flow continues below
+        -- to capture initial list when battle begins
+        
+        StartStatePersistence()
+    end
+    
+    if not playerTracker.initialListCaptured and not playerTracker.joinedInProgress then
+    local function CheckInProgress(attempt)
+        attempt = attempt or 1
+        if not insideBG then return end
+        if (playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured)) then
+            return
+        end
+            local isInProgressBG = false
+            local detectionMethod = "none"
+
+        RequestBattlefieldScoreData()
+
+        C_Timer.After(0.6, function()
+            if not insideBG then return end
+            if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
+                return
+            end
+            
+            if C_PvP and C_PvP.GetActiveMatchDuration then
+                local apiDuration = C_PvP.GetActiveMatchDuration() or 0
+                local timeInside = GetTime() - (bgStartTime or GetTime())
+                local durationDelta = apiDuration - timeInside
+
+                if apiDuration > 5 and durationDelta >= 10 then
+                    isInProgressBG = true
+                    detectionMethod = string.format("API_duration_%ss_delta_%s", tostring(apiDuration), tostring(math.floor(durationDelta)))
+                end
+            end
+            
+            if not isInProgressBG and IsEpicBattleground() then
+                local rows = GetNumBattlefieldScores()
+                if rows > 0 then
+                    local allianceCount, hordeCount = 0, 0
+                    local myFaction = UnitFactionGroup("player")
+                    local enemyFactionId = nil
+                    if myFaction == "Alliance" then
+                        enemyFactionId = 0
+                    elseif myFaction == "Horde" then
+                        enemyFactionId = 1
+                    end
+
+                    local allowedThreshold = (myFaction == "Alliance") and 10 or 6
+                    local activeEnemyThreshold = 3
+                    local visibleEnemy = 0
+                    local activeEnemy = 0
+
+                    for i = 1, math.min(rows, 30) do
+                        local success, s = pcall(C_PvP.GetScoreInfo, i)
+                        if success and s and s.name then
+                            local factionId = s.faction
+                            if factionId == nil then
+                                if type(s.side) == "number" then
+                                    factionId = s.side
+                                elseif type(s.side) == "string" then
+                                    if s.side == "Horde" then
+                                        factionId = 0
+                                    elseif s.side == "Alliance" then
+                                        factionId = 1
+                                    end
+                                end
+                            end
+
+                            if factionId == 0 then
+                                hordeCount = hordeCount + 1
+                            elseif factionId == 1 then
+                                allianceCount = allianceCount + 1
+                            end
+
+                            if enemyFactionId ~= nil and factionId == enemyFactionId then
+                                visibleEnemy = visibleEnemy + 1
+
+                                local damage = s.damageDone or s.damage or 0
+                                local healing = s.healingDone or s.healing or 0
+                                local killingBlows = s.killingBlows or s.kills or 0
+                                local honorableKills = s.honorableKills or s.honorKills or 0
+                                local deaths = s.deaths or 0
+                                local objectives = s.objectives or s.objectiveScore or 0
+
+                                if (damage > 0) or (healing > 0) or (killingBlows > 0) or (honorableKills > 0) or (deaths > 0) or (objectives > 0) then
+                                    activeEnemy = activeEnemy + 1
+                                end
+                            end
+                        end
+                    end
+
+
+                    if enemyFactionId ~= nil and visibleEnemy >= allowedThreshold and activeEnemy >= activeEnemyThreshold then
+                        isInProgressBG = true
+                        detectionMethod = string.format("enemy_visible_%d_players", visibleEnemy)
+                    end
+                end
+            end
+            
+            if isInProgressBG then
+                
+                playerTracker.joinedInProgress = true
+                playerTracker.battleHasBegun = true
+                
+                CaptureInitialPlayerList(true)
+                
+                playerTracker.playerJoinedInProgress = true
+                FlagStateDirty()
+                return
+            end
+
+            local epic = IsEpicBattleground()
+            local maxAttempts = epic and 6 or 4
+            local delays = epic and { 2, 6, 12, 20, 30, 45 } or { 2, 5, 10, 15 }
+            if attempt < maxAttempts then
+                local nextDelay = delays[attempt + 1] or 10
+                C_Timer.After(nextDelay, function() 
+                    if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
+                        return
+                    end
+                    CheckInProgress(attempt + 1) 
+                end)
+        end
+    end)
+    end
+    C_Timer.After(2, function() 
+        if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
+            return
+        end
+        CheckInProgress(1) 
+    end)
+    
+C_Timer.After(90, function()
+    if insideBG and not playerTracker.battleHasBegun then
+        playerTracker.battleHasBegun = true
+        FlagStateDirty()
+
+        if playerTracker.joinedInProgress then
+            return
+        end
+    end
+end)
+    
+    local checkCount = 0
+    local function CheckMatchStart()
+        checkCount = checkCount + 1
+        if insideBG and not playerTracker.initialListCaptured and checkCount <= 15 then
+            if playerTracker.joinedInProgress then
+                return
+            end
+
+            if IsMatchStarted() then
+                CaptureInitialPlayerList(false)
+            else
+                C_Timer.After(10, CheckMatchStart)
+            end
+        end
+    end
+
+    C_Timer.After(25, CheckMatchStart)
+    end
+end
+
 Driver:SetScript("OnEvent", function(_, e, ...)
     local newBGStatus = UpdateBattlegroundStatus()
-    local statusChanged = (newBGStatus ~= insideBG)
+    local wasInBG = insideBG
     
+    if e ~= "PLAYER_ENTERING_WORLD" and not insideBG and newBGStatus then
+        insideBG = true
+        HandleEnterBattleground(wasInBG)
+    end
+
     if e == "PLAYER_REGEN_ENABLED" then
         if pendingRefresh then
             RequestRefreshWindow()
         end
         return
     end
+
+    if e == "PLAYER_LOGOUT" then
+        SaveActiveMatchSnapshot()
+        return
+    end
     
     if e == "PLAYER_ENTERING_WORLD" then
 		RegisterCurrentCharacter()
 		
-    local wasInBG = insideBG
     insideBG = newBGStatus
     
-        -- Step 1: Not in BG? Clear saved state and wait
+        -- Step 1: Not in BG - recheck once before clearing saved list data
         if not insideBG then
-            ClearSessionState("not_in_bg")
+            if pendingEnterWorldRecheck < 1 then
+                pendingEnterWorldRecheck = pendingEnterWorldRecheck + 1
+                C_Timer.After(1.0, function()
+                    local handler = Driver:GetScript("OnEvent")
+                    if handler then
+                        handler(Driver, "PLAYER_ENTERING_WORLD")
+                    end
+                end)
+                return
+            end
+
+            pendingEnterWorldRecheck = 0
+            bgStartTime = 0
+            matchSaved = false
+            saveInProgress = false
+            ResetPlayerTracker()
             StopStatePersistence()
+            ClearSessionState("not in BG")
             return
         end
+
+        pendingEnterWorldRecheck = 0
         
         -- Step 2: In BG - try to restore saved list data
         if insideBG and not wasInBG then
-            local hasSavedState = BGLoggerSession and BGLoggerSession.activeMatch ~= nil
-            local hasInitialList = hasSavedState and BGLoggerSession.activeMatch.playerTracker and BGLoggerSession.activeMatch.playerTracker.initialPlayerList
-            local initialCount = 0
-            if hasInitialList then
-                for _ in pairs(BGLoggerSession.activeMatch.playerTracker.initialPlayerList) do
-                    initialCount = initialCount + 1
-                end
-            end
-            print("|cff00ffffBGLogger:|r Restore check - hasSavedState:", hasSavedState, "hasInitialList:", hasInitialList, "count:", initialCount)
-            
-            local restoredState = TryRestoreMatchState()
-            print("|cff00ffffBGLogger:|r Restore result:", restoredState)
-            
-            if restoredState then
-                -- Have saved list data - use it, proceed normally
-                print("|cff00ffffBGLogger:|r State restored successfully, initialListCaptured:", playerTracker.initialListCaptured)
-                StartStatePersistence()
-            else
-                -- Step 3: No saved list data - check if match has started
-                bgStartTime = GetTime()
-                matchSaved = false
-                saveInProgress = false
-                ResetPlayerTracker()
-                initialPlayerCount = 0
-                
-                -- Check if match already started (backfill scenario)
-                local apiDuration = 0
-                if C_PvP and C_PvP.GetActiveMatchDuration then
-                    apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                end
-                
-                if apiDuration > 10 then
-                    -- Match well underway, user is a backfill
-                    playerTracker.joinedInProgress = true
-                    playerTracker.joinedInProgressReason = "no_saved_data_match_started"
-                elseif apiDuration > 0 then
-                    -- Match just started (0-10s), try to capture initial list now
-                    -- This handles reload right as match begins
-                    C_Timer.After(0.5, function()
-                        if not insideBG then return end
-                        if playerTracker.initialListCaptured then return end
-                        RequestBattlefieldScoreData()
-                        C_Timer.After(0.5, function()
-                            if not insideBG then return end
-                            if not playerTracker.initialListCaptured then
-                                CaptureInitialPlayerList(true)
-                            end
-                        end)
-                    end)
-                end
-                -- If match not started (apiDuration == 0), normal flow continues below
-                -- to capture initial list when battle begins
-                
-                StartStatePersistence()
-            end
-            
-            if not playerTracker.initialListCaptured and not playerTracker.joinedInProgress then
-            local function CheckInProgress(attempt)
-                attempt = attempt or 1
-                if not insideBG then return end
-                if (playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured)) then
-                    return
-                end
-                    local isInProgressBG = false
-                    local detectionMethod = "none"
-
-                RequestBattlefieldScoreData()
-
-                C_Timer.After(0.6, function()
-                    if not insideBG then return end
-                    if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
-                        return
-                    end
-                    
-                    if C_PvP and C_PvP.GetActiveMatchDuration then
-                        local apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                        local timeInside = GetTime() - (bgStartTime or GetTime())
-                        local durationDelta = apiDuration - timeInside
-
-                        if apiDuration > 5 and durationDelta >= 10 then
-                            isInProgressBG = true
-                            detectionMethod = string.format("API_duration_%ss_delta_%s", tostring(apiDuration), tostring(math.floor(durationDelta)))
-                        end
-                    end
-                    
-                    if not isInProgressBG and IsEpicBattleground() then
-                        local rows = GetNumBattlefieldScores()
-                        if rows > 0 then
-                            local allianceCount, hordeCount = 0, 0
-                            local myFaction = UnitFactionGroup("player")
-                            local enemyFactionId = nil
-                            if myFaction == "Alliance" then
-                                enemyFactionId = 0
-                            elseif myFaction == "Horde" then
-                                enemyFactionId = 1
-                            end
-
-                            local allowedThreshold = (myFaction == "Alliance") and 10 or 6
-                            local activeEnemyThreshold = 3
-                            local visibleEnemy = 0
-                            local activeEnemy = 0
-
-                            for i = 1, math.min(rows, 30) do
-                                local success, s = pcall(C_PvP.GetScoreInfo, i)
-                                if success and s and s.name then
-                                    local factionId = s.faction
-                                    if factionId == nil then
-                                        if type(s.side) == "number" then
-                                            factionId = s.side
-                                        elseif type(s.side) == "string" then
-                                            if s.side == "Horde" then
-                                                factionId = 0
-                                            elseif s.side == "Alliance" then
-                                                factionId = 1
-                                            end
-                                        end
-                                    end
-
-                                    if factionId == 0 then
-                                        hordeCount = hordeCount + 1
-                                    elseif factionId == 1 then
-                                        allianceCount = allianceCount + 1
-                                    end
-
-                                    if enemyFactionId ~= nil and factionId == enemyFactionId then
-                                        visibleEnemy = visibleEnemy + 1
-
-                                        local damage = s.damageDone or s.damage or 0
-                                        local healing = s.healingDone or s.healing or 0
-                                        local killingBlows = s.killingBlows or s.kills or 0
-                                        local honorableKills = s.honorableKills or s.honorKills or 0
-                                        local deaths = s.deaths or 0
-                                        local objectives = s.objectives or s.objectiveScore or 0
-
-                                        if (damage > 0) or (healing > 0) or (killingBlows > 0) or (honorableKills > 0) or (deaths > 0) or (objectives > 0) then
-                                            activeEnemy = activeEnemy + 1
-                                        end
-                                    end
-                                end
-                            end
-
-
-                            if enemyFactionId ~= nil and visibleEnemy >= allowedThreshold and activeEnemy >= activeEnemyThreshold then
-                                isInProgressBG = true
-                                detectionMethod = string.format("enemy_visible_%d_players", visibleEnemy)
-                            end
-                        end
-                    end
-                    
-                    if isInProgressBG then
-                        
-                        playerTracker.joinedInProgress = true
-                        playerTracker.battleHasBegun = true
-                        
-                        CaptureInitialPlayerList(true)
-                        
-                        playerTracker.playerJoinedInProgress = true
-                        FlagStateDirty()
-                        return
-                    end
-
-                    local epic = IsEpicBattleground()
-                    local maxAttempts = epic and 6 or 4
-                    local delays = epic and { 2, 6, 12, 20, 30, 45 } or { 2, 5, 10, 15 }
-                    if attempt < maxAttempts then
-                        local nextDelay = delays[attempt + 1] or 10
-                        C_Timer.After(nextDelay, function() 
-                            if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
-                                return
-                            end
-                            CheckInProgress(attempt + 1) 
-                        end)
-                end
-            end)
-            end
-            C_Timer.After(2, function() 
-                if playerTracker and (playerTracker.battleHasBegun or playerTracker.initialListCaptured) then
-                    return
-                end
-                CheckInProgress(1) 
-            end)
-            
-    C_Timer.After(90, function()
-        if insideBG and not playerTracker.battleHasBegun then
-            playerTracker.battleHasBegun = true
-            FlagStateDirty()
-
-            if playerTracker.joinedInProgress then
-                return
-            end
-        end
-    end)
-            
-            local checkCount = 0
-            local function CheckMatchStart()
-                checkCount = checkCount + 1
-                if insideBG and not playerTracker.initialListCaptured and checkCount <= 15 then
-                    if playerTracker.joinedInProgress then
-                        return
-                    end
-
-                    if IsMatchStarted() then
-                        CaptureInitialPlayerList(false)
-                    else
-                        C_Timer.After(10, CheckMatchStart)
-                    end
-                end
-            end
-
-            C_Timer.After(25, CheckMatchStart)
-            end
-            
+            HandleEnterBattleground(wasInBG)
         elseif not insideBG and wasInBG then
             bgStartTime = 0
             matchSaved = false
@@ -4571,6 +4588,18 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     elseif e == "UPDATE_BATTLEFIELD_SCORE" then
         insideBG = newBGStatus
         
+        if insideBG and not playerTracker.initialListCaptured and not playerTracker.joinedInProgress then
+            local apiDuration = 0
+            if C_PvP and C_PvP.GetActiveMatchDuration then
+                apiDuration = C_PvP.GetActiveMatchDuration() or 0
+            end
+            if apiDuration == 0 and GetBattlefieldInstanceRunTime then
+                apiDuration = math.floor((GetBattlefieldInstanceRunTime() or 0) / 1000)
+            end
+            if apiDuration > 0 then
+                CaptureInitialPlayerList(true)
+            end
+        end
         
         if insideBG and not matchSaved then
             local timeSinceStart = GetTime() - bgStartTime
