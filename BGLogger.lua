@@ -1376,7 +1376,13 @@ local function ResetPlayerTracker()
 end
 
 local function GetPlayerKey(name, realm)
-    return (name or "Unknown") .. "-" .. (realm or "Unknown")
+    local n = tostring(name or "Unknown")
+    local r = tostring(realm or "Unknown")
+    if NormalizeRealmName then
+        r = NormalizeRealmName(r)
+    end
+    r = r:gsub("%s+", ""):gsub("'", "")
+    return n .. "-" .. r
 end
 
 IsEpicBattleground = function()
@@ -1882,8 +1888,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         return 
     end
     
-    
-    playerTracker.initialPlayerList = {}
+    local tempInitialPlayerList = {}
     
     local playerRealm = GetRealmName() or "Unknown-Realm"
     if GetNormalizedRealmName and GetNormalizedRealmName() ~= "" then
@@ -1892,7 +1897,6 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     
     local processedCount = 0
     local skippedCount = 0
-    local keyCollisions = {}
     
     for i = 1, rows do
         local success, s = pcall(C_PvP.GetScoreInfo, i)
@@ -1926,13 +1930,17 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
             
             local playerKey = GetPlayerKey(playerName, realmName)
             
-            if playerTracker.initialPlayerList[playerKey] then
-                keyCollisions[playerKey] = (keyCollisions[playerKey] or 0) + 1
-                
-                local uniqueKey = playerKey .. "_" .. i
-                playerKey = uniqueKey
-            end
-            
+            if tempInitialPlayerList[playerKey] then
+                tempInitialPlayerList[playerKey].collisions = tempInitialPlayerList[playerKey].collisions or {}
+                table.insert(tempInitialPlayerList[playerKey].collisions, {
+                    rowIndex = i,
+                    rawName = s.name,
+                    rawRealm = s.realm,
+                    guid = s.guid,
+                })
+                -- Keep the first entry as canonical and ignore duplicates for matching.
+                processedCount = processedCount + 1
+            else
             local className = ""
             local specName = s.talentSpec or s.specName or ""
             
@@ -1967,7 +1975,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 factionName = (s.faction == 0) and "Horde" or "Alliance"
             end
             
-            playerTracker.initialPlayerList[playerKey] = {
+            tempInitialPlayerList[playerKey] = {
                 name = playerName,
                 realm = realmName,
                 class = className,
@@ -1978,6 +1986,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 rawRace = s.race
             }
             processedCount = processedCount + 1
+            end
             
             end
         else
@@ -1985,13 +1994,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         end
     end
     
-    local initialCount = CountTableEntries(playerTracker.initialPlayerList)
-    
-    
-    if next(keyCollisions) then
-        for key, count in pairs(keyCollisions) do
-        end
-    end
+    local initialCount = CountTableEntries(tempInitialPlayerList)
     
     local completenessRatio = rows > 0 and (processedCount / rows) or 0
     local isLargeDisparity = skippedCount > 15 and completenessRatio < 0.7
@@ -2042,44 +2045,31 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     end
     
     if IsEpicBattleground() then
-        local aCount, hCount = CountFactionsInTable(playerTracker.initialPlayerList)
+        local aCount, hCount = CountFactionsInTable(tempInitialPlayerList)
         if (aCount == 0 or hCount == 0) and not playerTracker.initialCaptureRetried then
             playerTracker.initialCaptureRetried = true
+            playerTracker.initialListCaptured = false
             RequestBattlefieldScoreData()
             C_Timer.After(1.5, function()
-                if insideBG then
-                    local beforeCount = CountTableEntries(playerTracker.initialPlayerList)
-                    local rows2 = GetNumBattlefieldScores()
-                    for i = 1, rows2 do
-                        local ok, s2 = pcall(C_PvP.GetScoreInfo, i)
-                        if ok and s2 and s2.name and s2.name ~= "" then
-                            local pn, rn = s2.name, ""
-                            if s2.name:find("-") then pn, rn = s2.name:match("^(.+)-(.+)$") end
-                            if (not rn or rn == "") and s2.realm then rn = s2.realm end
-                            if (not rn or rn == "") and s2.guid then
-                                local _, _, _, _, _, _, _, rFrom = GetPlayerInfoByGUID(s2.guid)
-                                if rFrom and rFrom ~= "" then rn = rFrom end
-                            end
-                            if not rn or rn == "" then rn = GetRealmName() or "Unknown-Realm" end
-                            rn = rn:gsub("%s+", ""):gsub("'", "")
-                            local key = GetPlayerKey(pn, rn)
-                            if not playerTracker.initialPlayerList[key] then
-                                local factionName = (s2.faction == 1) and "Alliance" or ((s2.faction == 0) and "Horde" or (s2.side == 1 and "Alliance" or (s2.side == 0 and "Horde" or "")))
-                                playerTracker.initialPlayerList[key] = { name = pn, realm = rn, faction = factionName }
-                            end
-                        end
-                    end
-                    local afterCount = CountTableEntries(playerTracker.initialPlayerList)
+                if insideBG and not playerTracker.initialListCaptured then
+                    CaptureInitialPlayerList(true)
                 end
-                playerTracker.initialListCaptured = true
-                FlagStateDirty()
-                PersistMatchState("initial_capture_epic_refresh")
             end)
             return
         end
     end
 
+    -- Accept capture: only now commit to the persistent tracker table.
+    playerTracker.initialPlayerList = tempInitialPlayerList
     playerTracker.initialListCaptured = true
+
+    print(string.format(
+        "|cff00ffffBGLogger:|r Initial capture accepted rows=%d processed=%d skipped=%d initialCount=%d",
+        rows or 0,
+        processedCount or 0,
+        skippedCount or 0,
+        initialCount or 0
+    ))
     
     local count = 0
     for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
@@ -2280,8 +2270,7 @@ local function CollectScoreData(attemptNumber)
     end
     
     local currentPlayerName = UnitName("player")
-    local currentPlayerRealm = GetRealmName() or "Unknown-Realm"
-    currentPlayerRealm = currentPlayerRealm:gsub("%s+", ""):gsub("'", "")
+    local currentKey = GetPlayerKey(currentPlayerName, GetBestRealmName())
     local foundCurrentPlayer = false
     
     local playerRealm = GetBestRealmName()
@@ -2357,6 +2346,10 @@ local function CollectScoreData(attemptNumber)
             
             local rawDamage = s.damageDone or s.damage or 0
             local rawHealing = s.healingDone or s.healing or 0
+            local rating = s.rating or 0
+            local ratingChange = s.ratingChange or 0
+            local preMatchMMR = s.preMatchMMR or 0
+            local postMatchMMR = s.postMatchMMR or 0
             
             local map = C_Map.GetBestMapForUnit("player") or 0
             local mapInfo = C_Map.GetMapInfo(map)
@@ -2374,6 +2367,10 @@ local function CollectScoreData(attemptNumber)
                 kills = s.killingBlows or s.kills or 0,
                 deaths = s.deaths or 0,
                 honorableKills = s.honorableKills or s.honorKills or 0,
+                rating = rating,
+                ratingChange = ratingChange,
+                preMatchMMR = preMatchMMR,
+                postMatchMMR = postMatchMMR,
                 objectives = objectives,
                 objectiveBreakdown = objectiveBreakdown or {},
                 isBackfill = false,
@@ -2386,9 +2383,40 @@ local function CollectScoreData(attemptNumber)
         end
     end
      
+    local initialCount = CountTableEntries(playerTracker.initialPlayerList)
+    local finalCount = #t
+    local initialLooksBad =
+        (not playerTracker.initialListCaptured) or
+        (initialCount == 0) or
+        (finalCount > 0 and initialCount < math.floor(finalCount * 0.5))
+    local skipBackfillCompare = (not playerTracker.joinedInProgress) and initialLooksBad
+
+    local backfillCount = 0
+    if playerTracker.joinedInProgress then
+        for _, player in ipairs(t) do
+            if GetPlayerKey(player.name, player.realm) == currentKey then
+                backfillCount = backfillCount + 1
+            end
+        end
+    elseif not skipBackfillCompare then
+        for _, player in ipairs(t) do
+            local playerKey = GetPlayerKey(player.name, player.realm)
+            if not playerTracker.initialPlayerList[playerKey] then
+                backfillCount = backfillCount + 1
+            end
+        end
+    end
+
+    print(string.format(
+        "|cff00ffffBGLogger:|r Backfill debug finalCount=%d initialCount=%d skipBackfillCompare=%s backfillCount=%d",
+        finalCount or 0,
+        initialCount or 0,
+        tostring(skipBackfillCompare),
+        backfillCount or 0
+    ))
     
     local afkers = {}
-    if not playerTracker.joinedInProgress then
+    if not playerTracker.joinedInProgress and not skipBackfillCompare then
         for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
             local foundInFinal = false
             for _, finalPlayer in ipairs(t) do
@@ -2414,18 +2442,19 @@ local function CollectScoreData(attemptNumber)
     
     for _, player in ipairs(t) do
         local playerKey = GetPlayerKey(player.name, player.realm)
-        
+    
         if playerTracker.joinedInProgress then
-            local isCurrent = (player.name == currentPlayerName and player.realm == currentPlayerRealm)
+            local isCurrent = (GetPlayerKey(player.name, player.realm) == currentKey)
             player.isBackfill = isCurrent
             player.participationUnknown = not isCurrent
         else
-            if not playerTracker.initialPlayerList[playerKey] then
-                player.isBackfill = true
-            else
+            if skipBackfillCompare then
                 player.isBackfill = false
+                player.participationUnknown = true
+            else
+                player.isBackfill = not playerTracker.initialPlayerList[playerKey]
+                player.participationUnknown = false
             end
-            player.participationUnknown = false
         end
     end
     
@@ -2555,6 +2584,10 @@ local function CommitMatch(list)
                 kills = p.kills or p.killingBlows or p.kb or 0,
                 deaths = p.deaths or 0,
                 honorableKills = p.honorableKills or 0,
+                rating = p.rating or 0,
+                ratingChange = p.ratingChange or 0,
+                preMatchMMR = p.preMatchMMR or 0,
+                postMatchMMR = p.postMatchMMR or 0,
                 objectives = p.objectives or 0,
                 objectiveBreakdown = p.objectiveBreakdown or {},
                 isBackfill = p.isBackfill or false
@@ -3270,12 +3303,9 @@ local function MakeListButton(parent, i)
 end
 
 ---------------------------------------------------------------------
--- List Selection Helpers
+-- Renderers 
 ---------------------------------------------------------------------
----------------------------------------------------------------------
--- Renderers - completely rebuilt
----------------------------------------------------------------------
--- Assign to forward-declared variable (not local function) so callbacks can access it
+
 RequestRefreshWindow = function()
 	if not RefreshWindow then return end
 	if InCombatLockdown and InCombatLockdown() then
