@@ -15,6 +15,20 @@ end
 
 local SESSION_GUID = SESSION_GUID or NewSessionGUID()
 
+local function GetAddonVersion()
+	-- Prefer modern API, fall back to legacy.
+	if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
+		return C_AddOns.GetAddOnMetadata("BGLogger", "Version")
+	end
+	if type(GetAddOnMetadata) == "function" then
+		return GetAddOnMetadata("BGLogger", "Version")
+	end
+	return nil
+end
+
+local ADDON_VERSION = tostring(GetAddonVersion() or "Unknown")
+_G.BGLOGGER_ADDON_VERSION = ADDON_VERSION
+
 local function GetCurrentMapID()
 	-- IMPORTANT:
 	-- `C_Map.GetBestMapForUnit("player")` can return *sub-zone* UI map IDs inside some BGs
@@ -1360,6 +1374,14 @@ local function UpdateSelectionToolbar()
 			WINDOW.exportSelectedBtn:Hide()
 		end
 	end
+	if WINDOW.deleteSelectedBtn then
+		if WINDOW.currentView == "list" then
+			WINDOW.deleteSelectedBtn:Show()
+			WINDOW.deleteSelectedBtn:SetEnabled(count > 0)
+		else
+			WINDOW.deleteSelectedBtn:Hide()
+		end
+	end
 	if WINDOW.selectAllBtn then
 		if WINDOW.currentView == "list" then
 			WINDOW.selectAllBtn:Show()
@@ -1406,6 +1428,22 @@ local function ExportSelectedFromList()
 	else
 		print("|cff00ffffBGLogger:|r ExportSelectedBattlegrounds is not available.")
 	end
+end
+
+local pendingDeleteKeys = nil
+local function DeleteSelectedFromList()
+	if WINDOW and WINDOW.currentView ~= "list" then
+		print("|cff00ffffBGLogger:|r Please return to the list view to delete multiple logs.")
+		return
+	end
+	local keys = GetSelectedKeysInOrder()
+	if #keys == 0 then
+		print("|cff00ffffBGLogger:|r Select at least one battleground from the list first.")
+		return
+	end
+
+	pendingDeleteKeys = keys
+	StaticPopup_Show("BGLOGGER_DELETE_SELECTED")
 end
 local GetWinner              = _G.GetBattlefieldWinner
 
@@ -2479,10 +2517,26 @@ local function CollectScoreData(attemptNumber)
      
     local initialCount = CountTableEntries(playerTracker.initialPlayerList)
     local finalCount = #t
+
+    -- Determine whether the initial roster looks trustworthy enough to compare against.
+    -- Using a direct overlap ratio avoids false "unknown" statuses in matches where many players leave
+    -- (final scoreboard is much smaller than the initial roster).
+    local matchedFinal = 0
+    if finalCount > 0 and initialCount > 0 then
+        for _, player in ipairs(t) do
+            local playerKey = GetPlayerKey(player.name, player.realm)
+            if playerTracker.initialPlayerList[playerKey] then
+                matchedFinal = matchedFinal + 1
+            end
+        end
+    end
+    local overlapRatio = (finalCount > 0) and (matchedFinal / finalCount) or 0
+
     local initialLooksBad =
         (not playerTracker.initialListCaptured) or
         (initialCount == 0) or
-        (finalCount > 0 and initialCount < math.floor(finalCount * 0.5))
+        (finalCount > 0 and overlapRatio < 0.5)
+
     local skipBackfillCompare = (not playerTracker.joinedInProgress) and initialLooksBad
     
     local afkers = {}
@@ -2687,6 +2741,7 @@ local function CommitMatch(list)
             mapID = map,
             ended = date("%c"),
             stats = list,
+            addonVersion = ADDON_VERSION,
             
             battlegroundName = mapName,
             duration = duration,
@@ -2712,7 +2767,7 @@ local function CommitMatch(list)
                 metadata = { algorithm = "deep_v2", playerCount = #list },
                 generatedAt = GetServerTime(),
                 serverTime = GetServerTime(),
-                version = "BGLogger_v2.0",
+                version = ADDON_VERSION,
                 realm = GetRealmName() or "Unknown"
             }
         }
@@ -2723,7 +2778,9 @@ local function CommitMatch(list)
         if selfEntry then
             local didWin = nil
             if winner ~= "" then
-                didWin = (winner == selfFaction)
+                -- Use the player's in-match faction from the scoreboard (mercenary mode safe).
+                local matchFaction = selfEntry.faction or selfFaction
+                didWin = (winner == matchFaction)
             end
             -- Compute bgCategory using same logic as GetBattlegroundCategory
             local bgCategory
@@ -3153,38 +3210,65 @@ do
 end
 
 local SORTABLE_FIELDS = {
+    name = {
+        label = "Player",
+        sortType = "string",
+        accessor = function(row)
+            return row.name or ""
+        end
+    },
+    class = {
+        label = "Class",
+        sortType = "string",
+        accessor = function(row)
+            return row.class or ""
+        end
+    },
+    spec = {
+        label = "Spec",
+        sortType = "string",
+        accessor = function(row)
+            return row.spec or ""
+        end
+    },
     damage = {
         label = "Damage",
+        sortType = "number",
         accessor = function(row)
             return row.damage or row.dmg or 0
         end
     },
     healing = {
         label = "Healing",
+        sortType = "number",
         accessor = function(row)
             return row.healing or row.heal or 0
         end
     },
     kills = {
         label = "Kills",
+        sortType = "number",
         accessor = function(row)
             return row.kills or row.killingBlows or row.kb or 0
         end
     },
     deaths = {
         label = "Deaths",
+        sortType = "number",
         accessor = function(row)
             return row.deaths or 0
         end
     },
     objectives = {
         label = "Objectives",
+        sortType = "number",
         accessor = function(row)
             return row.objectives or 0
         end
     },
     hk = {
         label = "HK",
+        sortType = "number",
         accessor = function(row)
             return row.honorableKills or row.honorKills or row.hk or 0
         end
@@ -3221,11 +3305,21 @@ local function GetSortableValue(row, field)
     if not row or not SORTABLE_FIELDS[field] then
         return 0
     end
-    local ok, value = pcall(SORTABLE_FIELDS[field].accessor, row)
+    local def = SORTABLE_FIELDS[field]
+    local ok, value = pcall(def.accessor, row)
     if not ok then
-        return 0
+        return def.sortType == "string" and "" or 0
+    end
+    if def.sortType == "string" then
+        return tostring(value or ""):lower()
     end
     return tonumber(value) or 0
+end
+
+local function GetStableSortKey(row)
+    local name = tostring(row and row.name or ""):lower()
+    local realm = tostring(row and row.realm or ""):lower()
+    return name, realm
 end
 
 local function SetDetailSort(field)
@@ -3239,7 +3333,8 @@ local function SetDetailSort(field)
         WINDOW.detailSortDirection = (WINDOW.detailSortDirection == "asc") and "desc" or "asc"
     else
         WINDOW.detailSortField = field
-        WINDOW.detailSortDirection = "desc"
+        local def = SORTABLE_FIELDS[field]
+        WINDOW.detailSortDirection = (def and def.sortType == "string") and "asc" or "desc"
     end
     if WINDOW.currentView == "detail" and WINDOW.currentKey then
         ShowDetail(WINDOW.currentKey)
@@ -3714,14 +3809,22 @@ function ShowDetail(key)
         table.sort(regularPlayers, function(a, b)
             local aValue = GetSortableValue(a, WINDOW.detailSortField)
             local bValue = GetSortableValue(b, WINDOW.detailSortField)
+            local aName, aRealm = GetStableSortKey(a)
+            local bName, bRealm = GetStableSortKey(b)
             if WINDOW.detailSortDirection == "asc" then
                 if aValue == bValue then
-                    return (a.name or "") < (b.name or "")
+                    if aName == bName then
+                        return aRealm < bRealm
+                    end
+                    return aName < bName
                 end
                 return aValue < bValue
             else
                 if aValue == bValue then
-                    return (a.name or "") < (b.name or "")
+                    if aName == bName then
+                        return aRealm < bRealm
+                    end
+                    return aName < bName
                 end
                 return aValue > bValue
             end
@@ -3960,27 +4063,36 @@ local function CreateWindow()
     title:SetPoint("TOP", 0, -16)
     title:SetText("Battleground Statistics")
     
-    StaticPopupDialogs["BGLOGGER_CLEAR"] = {
-        text = "Clear all saved logs?",
+    StaticPopupDialogs["BGLOGGER_DELETE_SELECTED"] = {
+        text = "Delete selected logs? This cannot be undone.",
         button1 = YES,
         button2 = NO,
-        OnAccept = function() 
-            wipe(BGLoggerDB)
-			ClearAllSelections()
+        OnAccept = function()
+            if type(pendingDeleteKeys) ~= "table" or #pendingDeleteKeys == 0 then
+                return
+            end
+            for _, key in ipairs(pendingDeleteKeys) do
+                BGLoggerDB[key] = nil
+            end
+            pendingDeleteKeys = nil
+            ClearAllSelections()
             RequestRefreshWindow()
+        end,
+        OnCancel = function()
+            pendingDeleteKeys = nil
         end,
         timeout = 0,
         whileDead = true,
         hideOnEscape = true
     }
     
-    local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    clearBtn:SetSize(90, 22)
-    clearBtn:SetPoint("TOPRIGHT", -80, -40)
-    clearBtn:SetText("Clear All")
-    clearBtn:SetScript("OnClick", function() 
-        StaticPopup_Show("BGLOGGER_CLEAR")
-    end)
+    local deleteSelectedBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    deleteSelectedBtn:SetSize(120, 22)
+    deleteSelectedBtn:SetPoint("TOPRIGHT", -80, -40)
+    deleteSelectedBtn:SetText("Delete Selected")
+    deleteSelectedBtn:SetScript("OnClick", DeleteSelectedFromList)
+    deleteSelectedBtn:Hide()
+    f.deleteSelectedBtn = deleteSelectedBtn
     
     local backBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     backBtn:SetSize(60, 22)
@@ -4073,7 +4185,7 @@ local function CreateWindow()
     
     local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     refreshBtn:SetSize(80, 22)
-    refreshBtn:SetPoint("TOPRIGHT", clearBtn, "TOPLEFT", -10, 0)
+    refreshBtn:SetPoint("TOPRIGHT", deleteSelectedBtn, "TOPLEFT", -10, 0)
     refreshBtn:SetText("Refresh")
     refreshBtn:SetScript("OnClick", RequestRefreshWindow)
 

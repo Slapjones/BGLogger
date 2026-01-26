@@ -156,6 +156,16 @@ function ShowJSONExportFrame(jsonString, filename)
 	
 end
 
+local function GetAddonVersion()
+	if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
+		return C_AddOns.GetAddOnMetadata("BGLogger", "Version")
+	end
+	if type(GetAddOnMetadata) == "function" then
+		return GetAddOnMetadata("BGLogger", "Version")
+	end
+	return _G.BGLOGGER_ADDON_VERSION
+end
+
 local function BuildExportObject(key)
 	if not key or key == "" then
 		return nil, nil, "No battleground selected for export"
@@ -241,7 +251,7 @@ local function BuildExportObject(key)
 	}
 	local v2Hash, _ = GenerateDataHashV2FromExport(forHashV2)
 	exportData.integrity.hash = v2Hash
-	exportData.integrity.version = "BGLogger_v2.0"
+	exportData.integrity.version = tostring(GetAddonVersion() or "Unknown")
 	exportData.integrity.metadata = { algorithm = "deep_v2", playerCount = #exportPlayers }
 
 	return exportData, mapName
