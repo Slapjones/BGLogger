@@ -2,16 +2,106 @@ BGLoggerDB = BGLoggerDB or {}
 BGLoggerSession = BGLoggerSession or {}
 BGLoggerAccountChars = BGLoggerAccountChars or {}
 BGLoggerCharStats = BGLoggerCharStats or {}
+BGLoggerActiveMatch = BGLoggerActiveMatch or {}
 
 ---------------------------------------------------------------------
 -- globals
 ---------------------------------------------------------------------
+local IsEpicBattleground
+
+local function NewSessionGUID()
+	return tostring(time()) .. "-" .. tostring(math.random(100000, 999999))
+end
+
+local SESSION_GUID = SESSION_GUID or NewSessionGUID()
+
+local function GetCurrentMapID()
+	-- IMPORTANT:
+	-- `C_Map.GetBestMapForUnit("player")` can return *sub-zone* UI map IDs inside some BGs
+	-- (e.g. Alterac Valley), which will mismatch the battleground's instanceMapID.
+	-- For match signatures/restores we want a stable ID, so prefer instanceMapID while in PvP.
+	local instanceType = select(2, IsInInstance())
+	local inPvPInstance = (instanceType == "pvp")
+
+	if type(GetInstanceInfo) == "function" then
+		local instanceMapID = select(8, GetInstanceInfo())
+		if inPvPInstance and instanceMapID and instanceMapID ~= 0 then
+			return instanceMapID
+		end
+	end
+
+	local uiMapID = C_Map.GetBestMapForUnit("player") or 0
+	if uiMapID ~= 0 then
+		return uiMapID
+	end
+
+	-- Fallback (non-PvP or UI not ready): instanceMapID if available.
+	if type(GetInstanceInfo) == "function" then
+		local instanceMapID = select(8, GetInstanceInfo())
+		if instanceMapID and instanceMapID ~= 0 then
+			return instanceMapID
+		end
+	end
+
+	return 0
+end
+
+local function SafeGetBattlefieldInstanceID()
+	if type(GetBattlefieldInstanceID) == "function" then
+		local id = GetBattlefieldInstanceID()
+		if id and id ~= 0 then return id end
+	end
+	return nil
+end
+
+local function BuildMatchSignature()
+	local sig = {}
+	sig.mapID = GetCurrentMapID()
+	sig.isEpic = IsEpicBattleground() and true or false
+	sig.bfInstanceID = SafeGetBattlefieldInstanceID()
+	sig.sessionGUID = SESSION_GUID
+	sig.enteredAtEpoch = time()
+	sig.enteredAtSession = GetTime()
+	return sig
+end
+
+local function UpdateActiveMatchSignatureIfNeeded()
+	if not BGLoggerActiveMatch or not BGLoggerActiveMatch.signature then return end
+	local sig = BGLoggerActiveMatch.signature
+
+	local currentMap = GetCurrentMapID()
+	if (not sig.mapID or sig.mapID == 0) and currentMap ~= 0 then
+		sig.mapID = currentMap
+	end
+
+	local id = SafeGetBattlefieldInstanceID()
+	if (not sig.bfInstanceID or sig.bfInstanceID == 0) and id then
+		sig.bfInstanceID = id
+	end
+
+	sig.isEpic = IsEpicBattleground() and true or false
+	BGLoggerActiveMatch.lastTouchedEpoch = time()
+end
+
+local function WarmUpSignatureMapID(attempt)
+	attempt = (attempt or 1)
+	if not insideBG or not BGLoggerActiveMatch or not BGLoggerActiveMatch.signature then return end
+
+	UpdateActiveMatchSignatureIfNeeded()
+	if BGLoggerActiveMatch.signature.mapID and BGLoggerActiveMatch.signature.mapID ~= 0 then
+		return -- done
+	end
+
+	if attempt < 20 then -- ~10 seconds at 0.5s
+		C_Timer.After(0.5, function() WarmUpSignatureMapID(attempt + 1) end)
+	end
+end
+
 local WINDOW, DetailLines, ListButtons = nil, {}, {}
 local selectedLogs = {}
 local RefreshWindow
 local RequestRefreshWindow
 local RefreshSeasonDropdown, RefreshCharacterDropdown, RefreshBgTypeDropdown, RefreshMapDropdown
-local IsEpicBattleground
 
 local LINE_HEIGHT            = 20
 local BUTTON_HEIGHT          = LINE_HEIGHT * 2 + 4
@@ -194,6 +284,11 @@ local function ClearSessionState(reason)
         BGLoggerSession.activeMatch = nil
     end
     stateDirty = false
+end
+
+local function ClearActiveMatchState(reason)
+    -- SavedVariables-backed state for restoring initial capture through reloads.
+    BGLoggerActiveMatch = {}
 end
 
 local function FlagStateDirty()
@@ -1369,6 +1464,7 @@ local function ResetPlayerTracker()
         playerTracker.detectedAFKers = {}
         playerTracker.joinedInProgress = false
         playerTracker.playerJoinedInProgress = false
+        playerTracker.sawPrematchState = false
         FlagStateDirty()
         PersistMatchState("reset")
         
@@ -1816,15 +1912,9 @@ local function IsMatchStarted()
         return false
     end
     
-    local apiDuration = 0
-    if C_PvP and C_PvP.GetActiveMatchDuration then
-        apiDuration = C_PvP.GetActiveMatchDuration() or 0
-        
-        if apiDuration > 5 then
-            return true
-        elseif apiDuration == 0 then
-            return false
-        end
+    local duration = GetCurrentMatchDuration()
+    if duration and duration > 5 then
+        return true
     end
     
     local allianceCount, hordeCount = 0, 0
@@ -1862,7 +1952,6 @@ local function IsMatchStarted()
     
     
     local matchStarted = playerTracker.battleHasBegun and 
-                        apiDuration > 0 and 
                         bothFactionsVisible and 
                         hasMinimumPlayers and
                         timeSinceEntered >= minimumWaitTime
@@ -1872,7 +1961,6 @@ local function IsMatchStarted()
 end
 
 local function CaptureInitialPlayerList(skipMatchStartCheck)
-    
     if playerTracker.initialListCaptured then 
         return 
     end
@@ -2059,17 +2147,23 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
         end
     end
 
-    -- Accept capture: only now commit to the persistent tracker table.
     playerTracker.initialPlayerList = tempInitialPlayerList
     playerTracker.initialListCaptured = true
 
-    print(string.format(
-        "|cff00ffffBGLogger:|r Initial capture accepted rows=%d processed=%d skipped=%d initialCount=%d",
-        rows or 0,
-        processedCount or 0,
-        skippedCount or 0,
-        initialCount or 0
-    ))
+    BGLoggerActiveMatch = BGLoggerActiveMatch or {}
+    BGLoggerActiveMatch.signature = BGLoggerActiveMatch.signature or BuildMatchSignature()
+	UpdateActiveMatchSignatureIfNeeded()
+
+    local am = BGLoggerActiveMatch
+    am.state = am.state or {}
+    am.state.signature = am.signature
+    am.state.initialPlayerList = playerTracker.initialPlayerList
+    am.state.initialListCaptured = true
+    am.state.joinedInProgress = playerTracker.joinedInProgress
+    am.state.battleHasBegun = playerTracker.battleHasBegun
+    am.state.playerJoinedInProgress = playerTracker.playerJoinedInProgress
+    am.state.captureAcceptedEpoch = time()
+    am.lastTouchedEpoch = time()
     
     local count = 0
     for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
@@ -2390,30 +2484,6 @@ local function CollectScoreData(attemptNumber)
         (initialCount == 0) or
         (finalCount > 0 and initialCount < math.floor(finalCount * 0.5))
     local skipBackfillCompare = (not playerTracker.joinedInProgress) and initialLooksBad
-
-    local backfillCount = 0
-    if playerTracker.joinedInProgress then
-        for _, player in ipairs(t) do
-            if GetPlayerKey(player.name, player.realm) == currentKey then
-                backfillCount = backfillCount + 1
-            end
-        end
-    elseif not skipBackfillCompare then
-        for _, player in ipairs(t) do
-            local playerKey = GetPlayerKey(player.name, player.realm)
-            if not playerTracker.initialPlayerList[playerKey] then
-                backfillCount = backfillCount + 1
-            end
-        end
-    end
-
-    print(string.format(
-        "|cff00ffffBGLogger:|r Backfill debug finalCount=%d initialCount=%d skipBackfillCompare=%s backfillCount=%d",
-        finalCount or 0,
-        initialCount or 0,
-        tostring(skipBackfillCompare),
-        backfillCount or 0
-    ))
     
     local afkers = {}
     if not playerTracker.joinedInProgress and not skipBackfillCompare then
@@ -2670,6 +2740,7 @@ local function CommitMatch(list)
         end
         
         matchSaved = true
+        ClearActiveMatchState("match saved")
         ClearSessionState("match saved")
         StopStatePersistence()
         
@@ -4202,6 +4273,122 @@ C_Timer.After(0.5, function()
     RestoreFilterState()
 end)
 
+---------------------------------------------------------------------
+-- Active match restore (SavedVariables)
+---------------------------------------------------------------------
+local restoreSucceeded = false
+local restoreAttempts = 0
+local RESTORE_MAX_ATTEMPTS = 10
+local RESTORE_RETRY_DELAY = 0.5
+local restoreRetryScheduled = false
+
+local function SignatureMatchesCurrent(sig)
+	if not sig then return false end
+
+	-- If we're not sure yet whether we're actually in a BG (early login timing),
+	-- treat it as "unknown, retry" for a limited number of attempts.
+	-- IMPORTANT: Do not mutate the global insideBG here. The normal BG entry
+	-- transition logic relies on insideBG changing inside PLAYER_ENTERING_WORLD.
+	local isInBG = UpdateBattlegroundStatus()
+	if not isInBG then
+		if restoreAttempts < RESTORE_MAX_ATTEMPTS then
+			return nil
+		end
+		return false
+	end
+
+	local currentMap = GetCurrentMapID()
+	-- MapID of 0 is "not ready yet" early in load; don't treat it as a mismatch.
+	if currentMap == 0 then
+		return nil
+	end
+	if sig.mapID ~= currentMap then return false end
+
+	-- Treat bfInstanceID == 0 as "unset" (Lua considers 0 truthy).
+	local expectedBFID = sig.bfInstanceID
+	if expectedBFID == 0 then
+		expectedBFID = nil
+	end
+
+	local currentBFID = SafeGetBattlefieldInstanceID()
+	-- BF instance ID can also be unavailable briefly; if sig expects one, retry.
+	if expectedBFID and not currentBFID then
+		return nil
+	end
+	if expectedBFID and currentBFID and expectedBFID ~= currentBFID then
+		return false
+	end
+
+	local now = time()
+	local touched = BGLoggerActiveMatch and BGLoggerActiveMatch.lastTouchedEpoch
+	local ttlSeconds = 3 * 60 * 60
+	if touched and (now - touched) > ttlSeconds then
+		return false
+	end
+
+	return true
+end
+
+local function RestoreActiveMatchIfValid()
+	local am = BGLoggerActiveMatch
+	if not am or not am.signature or not am.state then return false end
+	local sigOk = SignatureMatchesCurrent(am.signature)
+	if sigOk ~= true then return sigOk end
+	if not am.state.initialListCaptured or not am.state.initialPlayerList then return false end
+
+	playerTracker.initialPlayerList = am.state.initialPlayerList
+	playerTracker.initialListCaptured = true
+	playerTracker.joinedInProgress = am.state.joinedInProgress or false
+	playerTracker.battleHasBegun = am.state.battleHasBegun or playerTracker.battleHasBegun or false
+	playerTracker.playerJoinedInProgress = am.state.playerJoinedInProgress or playerTracker.joinedInProgress or false
+
+	return true
+end
+
+local function ScheduleRestoreRetry()
+	if restoreRetryScheduled then return end
+	restoreRetryScheduled = true
+	C_Timer.After(RESTORE_RETRY_DELAY, function()
+		restoreRetryScheduled = false
+		-- Attempt again with whatever state is now available.
+		if restoreSucceeded then return end
+		restoreAttempts = restoreAttempts + 1
+		if restoreAttempts > RESTORE_MAX_ATTEMPTS then
+			return
+		end
+		local ok = RestoreActiveMatchIfValid()
+		if ok == true then
+			restoreSucceeded = true
+			return
+		end
+		if ok == nil and restoreAttempts < RESTORE_MAX_ATTEMPTS then
+			ScheduleRestoreRetry()
+		end
+	end)
+end
+
+local function RunRestoreActiveMatch()
+	if restoreSucceeded then return true end
+
+	local am = BGLoggerActiveMatch
+	if not am or not am.signature or not am.state then
+		return false
+	end
+
+	restoreAttempts = restoreAttempts + 1
+
+	local ok = RestoreActiveMatchIfValid()
+	if ok == true then
+		restoreSucceeded = true
+		return true
+	end
+	if ok == nil and restoreAttempts < RESTORE_MAX_ATTEMPTS then
+		ScheduleRestoreRetry()
+		return nil
+	end
+	return false
+end
+
 
 ---------------------------------------------------------------------
 -- Event driver
@@ -4209,6 +4396,7 @@ end)
 
 local Driver = CreateFrame("Frame")
 
+Driver:RegisterEvent("ADDON_LOADED")
 Driver:RegisterEvent("PLAYER_ENTERING_WORLD")
 Driver:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
 Driver:RegisterEvent("PLAYER_LEAVING_WORLD")
@@ -4240,6 +4428,15 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         end
         return
     end
+
+	if e == "ADDON_LOADED" then
+		local addonName = ...
+		if addonName ~= "BGLogger" then return end
+
+		-- SavedVariables are now available; attempt restore with retries (timing-safe).
+		RunRestoreActiveMatch()
+		return
+	end
     
     if e == "PLAYER_ENTERING_WORLD" then
 		RegisterCurrentCharacter()
@@ -4248,7 +4445,20 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     insideBG = newBGStatus
     
         if insideBG and not wasInBG then
-            local restoredState = TryRestoreMatchState()
+            -- Prefer the ActiveMatch SavedVariable restore. The legacy BGLoggerSession snapshot
+            -- can be stale and may overwrite a valid initial capture.
+            local hasActiveInitial =
+                BGLoggerActiveMatch
+                and BGLoggerActiveMatch.state
+                and BGLoggerActiveMatch.state.initialListCaptured
+                and BGLoggerActiveMatch.state.initialPlayerList
+
+            local restoredState = false
+            if hasActiveInitial then
+                restoredState = (RunRestoreActiveMatch() == true)
+            else
+                restoredState = TryRestoreMatchState()
+            end
             if restoredState then
             else
                 bgStartTime = GetTime()
@@ -4259,6 +4469,13 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             end
 
             StartStatePersistence()
+
+            BGLoggerActiveMatch = BGLoggerActiveMatch or {}
+            BGLoggerActiveMatch.signature = BuildMatchSignature()
+			UpdateActiveMatchSignatureIfNeeded()
+			WarmUpSignatureMapID(1)
+            BGLoggerActiveMatch.state = BGLoggerActiveMatch.state or {}
+            BGLoggerActiveMatch.lastTouchedEpoch = time()
             
             if not playerTracker.initialListCaptured then
             local function CheckInProgress(attempt)
@@ -4278,8 +4495,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                         return
                     end
                     
-                    if C_PvP and C_PvP.GetActiveMatchDuration then
-                        local apiDuration = C_PvP.GetActiveMatchDuration() or 0
+                    do
+                        local apiDuration = GetCurrentMatchDuration() or 0
                         local timeInside = GetTime() - (bgStartTime or GetTime())
                         local durationDelta = apiDuration - timeInside
 
@@ -4352,13 +4569,47 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                             end
                         end
                     end
+
+                    -- Generic in-progress detection for non-epic BGs/Blitz where duration APIs can be 0.
+                    if not isInProgressBG then
+                        local rows = GetNumBattlefieldScores()
+                        if rows > 0 then
+                            local activePlayers = 0
+                            for i = 1, math.min(rows, 30) do
+                                local success, s = pcall(C_PvP.GetScoreInfo, i)
+                                if success and s and s.name then
+                                    local damage = s.damageDone or s.damage or 0
+                                    local healing = s.healingDone or s.healing or 0
+                                    local killingBlows = s.killingBlows or s.kills or 0
+                                    local honorableKills = s.honorableKills or s.honorKills or 0
+                                    local deaths = s.deaths or 0
+                                    local objectives = s.objectives or s.objectiveScore or 0
+                                    if (damage > 0) or (healing > 0) or (killingBlows > 0) or (honorableKills > 0) or (deaths > 0) or (objectives > 0) then
+                                        activePlayers = activePlayers + 1
+                                    end
+                                end
+                            end
+
+                            local threshold = IsEpicBattleground() and 8 or 5
+                            local timeInside = GetTime() - (bgStartTime or GetTime())
+                            if activePlayers >= threshold and timeInside >= 10 then
+                                isInProgressBG = true
+                                detectionMethod = string.format("scoreboard_activity_%d", activePlayers)
+                            end
+                        end
+                    end
                     
                     if isInProgressBG then
                         
                         playerTracker.joinedInProgress = true
                         playerTracker.battleHasBegun = true
                         
-                        CaptureInitialPlayerList(true)
+                        RequestBattlefieldScoreData()
+                        C_Timer.After(1.0, function()
+                            if insideBG and not playerTracker.initialListCaptured then
+                                CaptureInitialPlayerList(true)
+                            end
+                        end)
                         
                         playerTracker.playerJoinedInProgress = true
                         FlagStateDirty()
@@ -4422,6 +4673,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             saveInProgress = false
             ResetPlayerTracker()
             StopStatePersistence()
+            ClearActiveMatchState("left battleground")
             ClearSessionState("left battleground")
         elseif not insideBG then
             bgStartTime = 0
@@ -4429,6 +4681,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             saveInProgress = false
             ResetPlayerTracker()
             StopStatePersistence()
+            ClearActiveMatchState("world load outside BG")
             ClearSessionState("world load outside BG")
         end
 
@@ -4478,16 +4731,73 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             end
         end
 
-    elseif e == "PVP_MATCH_STATE_CHANGED" and insideBG then
-        local matchState = ...
-        
-        local actualMatchState = matchState
-        if not actualMatchState and C_PvP and C_PvP.GetActiveMatchState then
-            actualMatchState = C_PvP.GetActiveMatchState()
+    elseif e == "PVP_MATCH_STATE_CHANGED" then
+        -- Prefer the authoritative match state API over chat parsing.
+        local rawState = nil
+        if C_PvP and C_PvP.GetActiveMatchState then
+            rawState = C_PvP.GetActiveMatchState()
+        else
+            rawState = ...
         end
-        
-        if actualMatchState == "complete" or actualMatchState == "finished" or actualMatchState == "ended" or 
-           actualMatchState == "concluded" or actualMatchState == "done" then
+        local actualMatchState = tostring(rawState or "")
+
+        -- Expected numeric-like string states:
+        -- "0" = not in BG, "2" = pre-match, "3" = started, "5" = concluded
+        if actualMatchState == "0" then
+            return
+        end
+
+        if actualMatchState == "2" then
+            -- Pre-match waiting period. Track that we were present for pre-match.
+            if insideBG then
+                playerTracker.sawPrematchState = true
+            end
+            return
+        end
+
+        if actualMatchState == "3" then
+            -- Match started. This is the primary signal for beginning capture.
+            insideBG = true
+            playerTracker.battleHasBegun = true
+            playerTracker.sawPrematchState = playerTracker.sawPrematchState or false
+            FlagStateDirty()
+
+            -- If we never saw pre-match since entering, we *might* have joined in-progress.
+            -- Guard with time-since-enter so we don't misclassify normal long pre-match periods
+            -- where state "2" simply never fired/was missed.
+            local timeSinceEnter = GetTime() - (bgStartTime or GetTime())
+            local likelyInProgress = (timeSinceEnter >= 0 and timeSinceEnter <= 20)
+            if (not playerTracker.sawPrematchState) and likelyInProgress and (not playerTracker.initialListCaptured) then
+                playerTracker.joinedInProgress = true
+                playerTracker.playerJoinedInProgress = true
+            elseif timeSinceEnter > 20 then
+                -- We were in the instance long enough that this should be a normal start.
+                playerTracker.joinedInProgress = false
+                playerTracker.playerJoinedInProgress = false
+            end
+
+            if not playerTracker.initialListCaptured then
+                local attempts = 0
+                local function TryCaptureFromMatchState()
+                    attempts = attempts + 1
+                    if not insideBG or playerTracker.initialListCaptured then return end
+                    RequestBattlefieldScoreData()
+                    C_Timer.After(0.8, function()
+                        if not insideBG or playerTracker.initialListCaptured then return end
+                        -- Skip match-start gate; match state "3" already guarantees started.
+                        CaptureInitialPlayerList(true)
+                        if not playerTracker.initialListCaptured and attempts < 8 then
+                            C_Timer.After(0.8, TryCaptureFromMatchState)
+                        end
+                    end)
+                end
+                TryCaptureFromMatchState()
+            end
+            return
+        end
+
+        if actualMatchState == "5" then
+            insideBG = true
             if not matchSaved then
                 local timeSinceStart = GetTime() - bgStartTime
                 if timeSinceStart > MIN_BG_TIME then
@@ -4498,36 +4808,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                 end
             end
             return
-        end
-
-        if not playerTracker.initialListCaptured then
-            
-            C_Timer.After(8, function()
-
-                local timeSinceStart = GetTime() - bgStartTime
-                if timeSinceStart >= 240 then
-                    return
-                end
-                
-                if insideBG and not playerTracker.initialListCaptured then
-                    local apiDuration = 0
-                    if C_PvP and C_PvP.GetActiveMatchDuration then
-                        apiDuration = C_PvP.GetActiveMatchDuration() or 0
-                        if apiDuration > 0 then
-                            playerTracker.battleHasBegun = true
-                            FlagStateDirty()
-                        end
-                    end
-                    
-                    local matchHasStarted = IsMatchStarted()
-                    
-                    local numPlayers = GetNumBattlefieldScores()
-                    
-                    if matchHasStarted then
-                        CaptureInitialPlayerList(IsEpicBattleground())
-                    end
-                end
-            end)
         end
 
 
