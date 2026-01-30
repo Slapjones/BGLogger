@@ -1478,6 +1478,7 @@ local ObjectiveIdMap = BGLoggerDB.__ObjectiveIdMap
 ---------------------------------------------------------------------
 local playerTracker = {
     initialPlayerList = {},
+    initialPlayerListByName = {},
     finalPlayerList = {},
     initialListCaptured = false,
     battleHasBegun = false,
@@ -1494,6 +1495,7 @@ end
 local function ResetPlayerTracker()
     if not insideBG or matchSaved then
         playerTracker.initialPlayerList = {}
+        playerTracker.initialPlayerListByName = {}
         playerTracker.finalPlayerList = {}
         playerTracker.initialListCaptured = false
         playerTracker.initialCaptureRetried = false
@@ -2007,6 +2009,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     end
     
     local tempInitialPlayerList = {}
+    local tempInitialByName = {}
     
     local playerRealm = GetRealmName() or "Unknown-Realm"
     if GetNormalizedRealmName and GetNormalizedRealmName() ~= "" then
@@ -2047,6 +2050,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
             realmName = realmName:gsub("%s+", ""):gsub("'", "")
             
             local playerKey = GetPlayerKey(playerName, realmName)
+            local nameKey = tostring(playerName or ""):lower()
             
             if tempInitialPlayerList[playerKey] then
                 tempInitialPlayerList[playerKey].collisions = tempInitialPlayerList[playerKey].collisions or {}
@@ -2111,6 +2115,15 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
                 rawSide = s.side,
                 rawRace = s.race
             }
+            if nameKey ~= "" and not tempInitialByName[nameKey] then
+                tempInitialByName[nameKey] = {
+                    name = playerName,
+                    realm = realmName,
+                    class = className,
+                    spec = specName,
+                    faction = factionName,
+                }
+            end
             processedCount = processedCount + 1
             end
             
@@ -2186,6 +2199,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     end
 
     playerTracker.initialPlayerList = tempInitialPlayerList
+    playerTracker.initialPlayerListByName = tempInitialByName
     playerTracker.initialListCaptured = true
 
     BGLoggerActiveMatch = BGLoggerActiveMatch or {}
@@ -2196,6 +2210,7 @@ local function CaptureInitialPlayerList(skipMatchStartCheck)
     am.state = am.state or {}
     am.state.signature = am.signature
     am.state.initialPlayerList = playerTracker.initialPlayerList
+    am.state.initialPlayerListByName = playerTracker.initialPlayerListByName
     am.state.initialListCaptured = true
     am.state.joinedInProgress = playerTracker.joinedInProgress
     am.state.battleHasBegun = playerTracker.battleHasBegun
@@ -2530,7 +2545,9 @@ local function CollectScoreData(attemptNumber)
     if finalCount > 0 and initialCount > 0 then
         for _, player in ipairs(t) do
             local playerKey = GetPlayerKey(player.name, player.realm)
-            if playerTracker.initialPlayerList[playerKey] then
+            local nameKey = tostring(player.name or ""):lower()
+            if playerTracker.initialPlayerList[playerKey]
+                or (nameKey ~= "" and playerTracker.initialPlayerListByName and playerTracker.initialPlayerListByName[nameKey]) then
                 matchedFinal = matchedFinal + 1
             end
         end
@@ -2546,6 +2563,11 @@ local function CollectScoreData(attemptNumber)
     
     local afkers = {}
     if not playerTracker.joinedInProgress and not skipBackfillCompare then
+        local finalByName = {}
+        for _, finalPlayer in ipairs(t) do
+            local nk = tostring(finalPlayer.name or ""):lower()
+            if nk ~= "" then finalByName[nk] = true end
+        end
         for playerKey, playerInfo in pairs(playerTracker.initialPlayerList) do
             local foundInFinal = false
             for _, finalPlayer in ipairs(t) do
@@ -2553,6 +2575,12 @@ local function CollectScoreData(attemptNumber)
                 if finalPlayerKey == playerKey then
                     foundInFinal = true
                     break
+                end
+            end
+            if not foundInFinal then
+                local nameKey = tostring(playerInfo.name or ""):lower()
+                if nameKey ~= "" and finalByName[nameKey] then
+                    foundInFinal = true
                 end
             end
             
@@ -2581,7 +2609,11 @@ local function CollectScoreData(attemptNumber)
                 player.isBackfill = false
                 player.participationUnknown = true
             else
-                player.isBackfill = not playerTracker.initialPlayerList[playerKey]
+                local nameKey = tostring(player.name or ""):lower()
+                local inInitial =
+                    (playerTracker.initialPlayerList and playerTracker.initialPlayerList[playerKey])
+                    or (nameKey ~= "" and playerTracker.initialPlayerListByName and playerTracker.initialPlayerListByName[nameKey])
+                player.isBackfill = not inInitial
                 player.participationUnknown = false
             end
         end
@@ -4446,6 +4478,7 @@ local function RestoreActiveMatchIfValid()
 	if not am.state.initialListCaptured or not am.state.initialPlayerList then return false end
 
 	playerTracker.initialPlayerList = am.state.initialPlayerList
+	playerTracker.initialPlayerListByName = am.state.initialPlayerListByName or playerTracker.initialPlayerListByName or {}
 	playerTracker.initialListCaptured = true
 	playerTracker.joinedInProgress = am.state.joinedInProgress or false
 	playerTracker.battleHasBegun = am.state.battleHasBegun or playerTracker.battleHasBegun or false
@@ -4551,7 +4584,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
     local wasInBG = insideBG
     insideBG = newBGStatus
     
-        if insideBG and not wasInBG then
+        if insideBG and (not wasInBG or bgStartTime == 0) then
             local hasActiveInitial =
                 BGLoggerActiveMatch
                 and BGLoggerActiveMatch.state
@@ -4602,10 +4635,10 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                     
                     do
                         local apiDuration = GetCurrentMatchDuration() or 0
-                        local timeInside = GetTime() - (bgStartTime or GetTime())
+                        local timeInside = (bgStartTime and bgStartTime > 0) and (GetTime() - bgStartTime) or 0
                         local durationDelta = apiDuration - timeInside
 
-                        if apiDuration >= 60 and durationDelta >= 30 then
+                        if timeInside <= 15 and apiDuration >= 120 and durationDelta >= 60 then
                             isInProgressBG = true
                             detectionMethod = string.format("API_duration_%ss_delta_%s", tostring(apiDuration), tostring(math.floor(durationDelta)))
                         end
@@ -4695,8 +4728,8 @@ Driver:SetScript("OnEvent", function(_, e, ...)
                             end
 
                             local threshold = IsEpicBattleground() and 8 or 5
-                            local timeInside = GetTime() - (bgStartTime or GetTime())
-                            if activePlayers >= threshold and timeInside >= 10 then
+                            local timeInside = (bgStartTime and bgStartTime > 0) and (GetTime() - bgStartTime) or 0
+                            if activePlayers >= threshold and timeInside <= 15 then
                                 isInProgressBG = true
                                 detectionMethod = string.format("scoreboard_activity_%d", activePlayers)
                             end
@@ -4852,8 +4885,7 @@ Driver:SetScript("OnEvent", function(_, e, ...)
             rawState = ...
         end
         local actualMatchState = tostring(rawState or "")
-
-        -- "0" = not in BG, "2" = pre-match, "3" = started, "5" = concluded
+        insideBG = newBGStatus
         if actualMatchState == "0" then
             return
         end
@@ -4866,19 +4898,36 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         end
 
         if actualMatchState == "3" then
-            insideBG = true
             playerTracker.battleHasBegun = true
             playerTracker.sawPrematchState = playerTracker.sawPrematchState or false
             FlagStateDirty()
 
-            local timeSinceEnter = GetTime() - (bgStartTime or GetTime())
-            local likelyInProgress = (timeSinceEnter >= 0 and timeSinceEnter <= 20)
+            local enterTime = (bgStartTime and bgStartTime > 0) and bgStartTime or GetTime()
+            local timeSinceEnter = GetTime() - enterTime
+            local apiDuration = GetCurrentMatchDuration() or 0
+            local rows = GetNumBattlefieldScores()
+            local activePlayers = 0
+            if rows and rows > 0 then
+                for i = 1, math.min(rows, 20) do
+                    local success, s = pcall(C_PvP.GetScoreInfo, i)
+                    if success and s and s.name then
+                        local damage = s.damageDone or s.damage or 0
+                        local healing = s.healingDone or s.healing or 0
+                        local killingBlows = s.killingBlows or s.kills or 0
+                        local honorableKills = s.honorableKills or s.honorKills or 0
+                        local deaths = s.deaths or 0
+                        local objectives = s.objectives or s.objectiveScore or 0
+                        if (damage > 0) or (healing > 0) or (killingBlows > 0) or (honorableKills > 0) or (deaths > 0) or (objectives > 0) then
+                            activePlayers = activePlayers + 1
+                        end
+                    end
+                end
+            end
+
+            local likelyInProgress = (timeSinceEnter <= 15) and (apiDuration >= 120) and (activePlayers >= 3)
             if (not playerTracker.sawPrematchState) and likelyInProgress and (not playerTracker.initialListCaptured) then
                 playerTracker.joinedInProgress = true
                 playerTracker.playerJoinedInProgress = true
-            elseif timeSinceEnter > 20 then
-                playerTracker.joinedInProgress = false
-                playerTracker.playerJoinedInProgress = false
             end
 
             if not playerTracker.initialListCaptured then
@@ -4901,7 +4950,6 @@ Driver:SetScript("OnEvent", function(_, e, ...)
         end
 
         if actualMatchState == "5" then
-            insideBG = true
             if not matchSaved then
                 local timeSinceStart = GetTime() - bgStartTime
                 if timeSinceStart > MIN_BG_TIME then
