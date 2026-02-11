@@ -1,4 +1,4 @@
-## Interface: 117000, 120000
+## Interface: 117000, 120000, 120001
 ## Title: BGLogger
 ## Notes: Record of battleground statistics for export
 ## Author: Slapjones
