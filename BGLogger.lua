@@ -1721,6 +1721,14 @@ local function ExtractObjectiveData(scoreData, battlegroundName)
     return ExtractObjectiveDataLegacy(scoreData, battlegroundName)
 end
 
+local function HumanizeObjectiveKey(key)
+    local text = tostring(key or "objectives")
+    text = text:gsub("_", " ")
+    text = text:gsub("([a-z])([A-Z])", "%1 %2")
+    text = text:gsub("^%l", string.upper)
+    return text
+end
+
 local function GetObjectiveColumns(battlegroundName, playerDataList)
     local bgName = (battlegroundName or ""):lower()
     local availableObjectives = {}
@@ -1728,7 +1736,7 @@ local function GetObjectiveColumns(battlegroundName, playerDataList)
     for _, player in ipairs(playerDataList or {}) do
         if player.objectiveBreakdown then
             for objType, value in pairs(player.objectiveBreakdown) do
-                if value > 0 then
+                if (tonumber(value) or 0) > 0 then
                     availableObjectives[objType] = true
                 end
             end
@@ -1807,17 +1815,46 @@ local function GetObjectiveColumns(battlegroundName, playerDataList)
     end
     
     local activeColumns = {}
+    local seenKeys = {}
     for _, colDef in ipairs(columnDefinitions) do
         if availableObjectives[colDef.key] then
+            seenKeys[colDef.key] = true
             table.insert(activeColumns, colDef)
         end
     end
-    
-    if #activeColumns == 0 then
-        table.insert(activeColumns, {key = "objectives", name = "Obj", tooltip = "Total Objectives"})
+
+    local unknownObjectiveKeys = {}
+    for objectiveKey in pairs(availableObjectives) do
+        if not seenKeys[objectiveKey] then
+            table.insert(unknownObjectiveKeys, objectiveKey)
+        end
     end
-    
-    
+    table.sort(unknownObjectiveKeys)
+    for _, objectiveKey in ipairs(unknownObjectiveKeys) do
+        table.insert(activeColumns, {
+            key = objectiveKey,
+            name = HumanizeObjectiveKey(objectiveKey),
+            tooltip = HumanizeObjectiveKey(objectiveKey)
+        })
+    end
+
+    if #activeColumns == 0 then
+        local hasAnyTotalObjectives = false
+        for _, player in ipairs(playerDataList or {}) do
+            if player and (tonumber(player.objectives) or 0) > 0 then
+                hasAnyTotalObjectives = true
+                break
+            end
+        end
+        if hasAnyTotalObjectives then
+            table.insert(activeColumns, {
+                key = "objectives",
+                name = "Objectives",
+                tooltip = "Objectives"
+            })
+        end
+    end
+
     return activeColumns
 end
 
@@ -2564,68 +2601,76 @@ end
 -- UI factory - completely rebuilt with proper column positioning
 ---------------------------------------------------------------------
 
-local COLUMN_ORDER = {
+local BASE_NON_OBJECTIVE_ORDER = {
     "name",
-    "realm",
-    "class",
     "spec",
     "faction",
+    "kills",
+    "hk",
+    "deaths",
     "damage",
     "healing",
-    "kills",
-    "deaths",
-    "objectives",
-    "hk"
 }
 
-local COLUMN_HEADERS = {
+local BASE_COLUMN_HEADERS = {
     name = "Player",
-    realm = "Realm",
-    class = "Class",
     spec = "Spec",
     faction = "Faction",
+    kills = "Killing Blows",
+    hk = "Honorable Kills",
+    deaths = "Deaths",
     damage = "Damage",
     healing = "Healing",
-    kills = "Kills",
-    deaths = "Deaths",
-    objectives = "Objectives",
-    hk = "HK"
 }
 
-local COLUMN_ALIGNMENT = {
+local BASE_COLUMN_ALIGNMENT = {
     name = "LEFT",
-    realm = "LEFT",
-    class = "CENTER",
     spec = "CENTER",
     faction = "CENTER",
-    damage = "RIGHT",
-    healing = "RIGHT",
     kills = "CENTER",
+    hk = "CENTER",
     deaths = "CENTER",
-    objectives = "CENTER",
-    hk = "CENTER"
+    damage = "CENTER",
+    healing = "CENTER",
 }
 
-local COLUMN_WIDTHS = {
-    name = 170,
-    realm = 120,
-    class = 90,
+local BASE_COLUMN_WIDTHS = {
+    name = 360,
     spec = 110,
     faction = 80,
-    damage = 100,
-    healing = 100,
-    kills = 50,
-    deaths = 50,
-    objectives = 80,
-    hk = 70
+    kills = 58,
+    hk = 74,
+    deaths = 58,
+    damage = 125,
+    healing = 125,
 }
 
-local COLUMN_GAP = 8
+local COLUMN_ORDER = {}
+local COLUMN_HEADERS = {}
+local COLUMN_ALIGNMENT = {}
+local COLUMN_WIDTHS = {}
+local SORTABLE_FIELDS = {}
+local DETAIL_OBJECTIVE_COLUMNS = {}
+local DETAIL_OBJECTIVE_KEY_BY_FIELD = {}
+local DETAIL_OBJECTIVE_TOOLTIP_BY_FIELD = {}
+
+local COLUMN_GAP = 6
 local DETAIL_LEFT_PADDING = 12
 local COLUMN_POSITIONS = {}
 local DETAIL_CONTENT_WIDTH = 0
+local OBJECTIVE_COLUMN_WIDTH_TARGET = 74
+local OBJECTIVE_COLUMN_WIDTH_MIN = 48
 
-do
+local function CopyShallowTable(source)
+    local copy = {}
+    for k, v in pairs(source or {}) do
+        copy[k] = v
+    end
+    return copy
+end
+
+local function RebuildDetailColumnGeometry()
+    wipe(COLUMN_POSITIONS)
     local x = DETAIL_LEFT_PADDING
     for _, key in ipairs(COLUMN_ORDER) do
         COLUMN_POSITIONS[key] = x
@@ -2634,19 +2679,12 @@ do
     DETAIL_CONTENT_WIDTH = x - COLUMN_GAP + DETAIL_LEFT_PADDING
 end
 
-local SORTABLE_FIELDS = {
+local SORTABLE_FIELDS_BASE = {
     name = {
         label = "Player",
         sortType = "string",
         accessor = function(row)
             return row.name or ""
-        end
-    },
-    class = {
-        label = "Class",
-        sortType = "string",
-        accessor = function(row)
-            return row.class or ""
         end
     },
     spec = {
@@ -2671,7 +2709,7 @@ local SORTABLE_FIELDS = {
         end
     },
     kills = {
-        label = "Kills",
+        label = "Killing Blows",
         sortType = "number",
         accessor = function(row)
             return row.kills or row.killingBlows or row.kb or 0
@@ -2684,15 +2722,8 @@ local SORTABLE_FIELDS = {
             return row.deaths or 0
         end
     },
-    objectives = {
-        label = "Objectives",
-        sortType = "number",
-        accessor = function(row)
-            return row.objectives or 0
-        end
-    },
     hk = {
-        label = "HK",
+        label = "Honorable Kills",
         sortType = "number",
         accessor = function(row)
             return row.honorableKills or row.honorKills or row.hk or 0
@@ -2700,26 +2731,384 @@ local SORTABLE_FIELDS = {
     }
 }
 
+local function ResetSortableFields()
+    wipe(SORTABLE_FIELDS)
+    for key, def in pairs(SORTABLE_FIELDS_BASE) do
+        SORTABLE_FIELDS[key] = def
+    end
+end
+
+local function BuildObjectiveHeaderText(label, objectiveCount)
+    local text = tostring(label or "Objective")
+    if objectiveCount >= 3 and not text:find("\n", 1, true) then
+        local left, right = text:match("^(%S+)%s+(.+)$")
+        if left and right then
+            return left .. "\n" .. right
+        end
+    end
+    return text
+end
+
+local function ConfigureDetailColumnsForLog(data, battlegroundName)
+    local rows = (data and data.stats) or {}
+    local objectiveDefinitions = GetObjectiveColumns(battlegroundName or "", rows) or {}
+    local objectiveCount = #objectiveDefinitions
+
+    local widths = CopyShallowTable(BASE_COLUMN_WIDTHS)
+    if objectiveCount >= 3 then
+        widths.name = 330
+        widths.spec = 98
+        widths.damage = 112
+        widths.healing = 112
+    end
+    if objectiveCount >= 5 then
+        widths.name = 280
+        widths.spec = 90
+        widths.faction = 68
+        widths.damage = 96
+        widths.healing = 96
+        widths.kills = 52
+        widths.deaths = 52
+        widths.hk = 62
+    end
+
+    local availableWidth = WIN_W - 90
+    if WINDOW and WINDOW.detailScroll and type(WINDOW.detailScroll.GetWidth) == "function" then
+        local scrollWidth = WINDOW.detailScroll:GetWidth() or 0
+        if scrollWidth > 0 then
+            availableWidth = scrollWidth - 18
+        end
+    end
+    local usableWidth = math.max(980, availableWidth - DETAIL_LEFT_PADDING * 2)
+
+    local objectiveWidth = 0
+    if objectiveCount > 0 then
+        local fixedWidth = 0
+        for _, key in ipairs(BASE_NON_OBJECTIVE_ORDER) do
+            fixedWidth = fixedWidth + (widths[key] or 0)
+        end
+        local projectedColumns = #BASE_NON_OBJECTIVE_ORDER + objectiveCount
+        local projectedGaps = math.max(projectedColumns - 1, 0) * COLUMN_GAP
+        local remainingForObjectives = usableWidth - fixedWidth - projectedGaps
+        objectiveWidth = math.floor(remainingForObjectives / objectiveCount)
+        objectiveWidth = math.max(OBJECTIVE_COLUMN_WIDTH_MIN, math.min(OBJECTIVE_COLUMN_WIDTH_TARGET, objectiveWidth))
+    end
+
+    local newOrder = {
+        "name",
+        "spec",
+        "faction",
+        "kills",
+        "hk",
+        "deaths",
+        "damage",
+        "healing",
+    }
+    local newHeaders = CopyShallowTable(BASE_COLUMN_HEADERS)
+    local newAlignment = CopyShallowTable(BASE_COLUMN_ALIGNMENT)
+    local newWidths = CopyShallowTable(widths)
+
+    wipe(DETAIL_OBJECTIVE_COLUMNS)
+    wipe(DETAIL_OBJECTIVE_KEY_BY_FIELD)
+    wipe(DETAIL_OBJECTIVE_TOOLTIP_BY_FIELD)
+
+    for i, objectiveDef in ipairs(objectiveDefinitions) do
+        local field = "obj_" .. tostring(i)
+        local objectiveKey = objectiveDef.key
+        local objectiveLabel = objectiveDef.name or HumanizeObjectiveKey(objectiveKey)
+        local objectiveTooltip = objectiveDef.tooltip or HumanizeObjectiveKey(objectiveKey)
+
+        table.insert(newOrder, field)
+        newHeaders[field] = BuildObjectiveHeaderText(objectiveLabel, objectiveCount)
+        newAlignment[field] = "CENTER"
+        newWidths[field] = objectiveWidth
+
+        table.insert(DETAIL_OBJECTIVE_COLUMNS, {
+            field = field,
+            key = objectiveKey,
+            label = objectiveLabel,
+        })
+        DETAIL_OBJECTIVE_KEY_BY_FIELD[field] = objectiveKey
+        DETAIL_OBJECTIVE_TOOLTIP_BY_FIELD[field] = objectiveTooltip
+    end
+
+    -- Keep objective columns slim, but avoid a large empty field on the right by
+    -- distributing any remaining width across core columns.
+    local projectedWidth = 0
+    for _, columnKey in ipairs(newOrder) do
+        projectedWidth = projectedWidth + (newWidths[columnKey] or 0)
+    end
+    local projectedGaps = math.max(#newOrder - 1, 0) * COLUMN_GAP
+    projectedWidth = projectedWidth + projectedGaps
+
+    local extraWidth = math.floor(usableWidth - projectedWidth)
+    if extraWidth > 0 then
+        local growthColumns = { "name", "spec", "damage", "healing", "faction" }
+        local growthCount = #growthColumns
+        if growthCount > 0 then
+            local perColumn = math.floor(extraWidth / growthCount)
+            local remainder = extraWidth % growthCount
+            for i, columnKey in ipairs(growthColumns) do
+                if newWidths[columnKey] then
+                    newWidths[columnKey] = newWidths[columnKey] + perColumn + ((i <= remainder) and 1 or 0)
+                end
+            end
+        end
+    end
+
+    COLUMN_ORDER = newOrder
+    COLUMN_HEADERS = newHeaders
+    COLUMN_ALIGNMENT = newAlignment
+    COLUMN_WIDTHS = newWidths
+
+    ResetSortableFields()
+    for _, objectiveColumn in ipairs(DETAIL_OBJECTIVE_COLUMNS) do
+        local fieldName = objectiveColumn.field
+        local objectiveKey = objectiveColumn.key
+        SORTABLE_FIELDS[fieldName] = {
+            label = objectiveColumn.label or HumanizeObjectiveKey(objectiveKey),
+            sortType = "number",
+            accessor = function(row)
+                if not row then return 0 end
+                if type(row.objectiveBreakdown) == "table" then
+                    local value = row.objectiveBreakdown[objectiveKey]
+                    if value then
+                        return tonumber(value) or 0
+                    end
+                end
+                if objectiveKey == "objectives" then
+                    return tonumber(row.objectives) or 0
+                end
+                return 0
+            end,
+        }
+    end
+
+    RebuildDetailColumnGeometry()
+
+    if WINDOW then
+        local signatureParts = {}
+        for _, objectiveColumn in ipairs(DETAIL_OBJECTIVE_COLUMNS) do
+            table.insert(signatureParts, tostring(objectiveColumn.key))
+        end
+        local layoutSignature = table.concat(signatureParts, "|")
+        if WINDOW.detailLayoutSignature ~= layoutSignature then
+            for _, line in ipairs(DetailLines) do
+                if line then
+                    line:Hide()
+                end
+            end
+            wipe(DetailLines)
+            WINDOW.detailLayoutSignature = layoutSignature
+            if WINDOW.detailSortField and not SORTABLE_FIELDS[WINDOW.detailSortField] then
+                WINDOW.detailSortField = "damage"
+                WINDOW.detailSortDirection = "desc"
+            end
+        end
+        if WINDOW.detailContent and WINDOW.detailScroll and type(WINDOW.detailScroll.GetWidth) == "function" then
+            local scrollWidth = WINDOW.detailScroll:GetWidth() or 0
+            if scrollWidth > 0 then
+                WINDOW.detailContent:SetWidth(math.max(scrollWidth - 16, DETAIL_CONTENT_WIDTH))
+            end
+        end
+    end
+end
+
+COLUMN_ORDER = CopyShallowTable(BASE_NON_OBJECTIVE_ORDER)
+COLUMN_HEADERS = CopyShallowTable(BASE_COLUMN_HEADERS)
+COLUMN_ALIGNMENT = CopyShallowTable(BASE_COLUMN_ALIGNMENT)
+COLUMN_WIDTHS = CopyShallowTable(BASE_COLUMN_WIDTHS)
+ResetSortableFields()
+RebuildDetailColumnGeometry()
+
 local DETAIL_ROW_COLORS = {
-    even = {0.08, 0.08, 0.10, 0.78},
-    odd = {0.10, 0.10, 0.12, 0.78},
-    unknown = {0.12, 0.12, 0.12, 0.80},
-    totals = {0.14, 0.14, 0.18, 0.92},
-    summary = {0.11, 0.11, 0.16, 0.88},
-    header = {0.14, 0.14, 0.18, 0.95},
-    section = {0.11, 0.11, 0.15, 0.80}
+    even = {0.06, 0.06, 0.09, 0.86},
+    odd = {0.06, 0.06, 0.09, 0.86},
+    allianceEven = {0.04, 0.09, 0.18, 0.90},
+    allianceOdd = {0.04, 0.09, 0.18, 0.90},
+    hordeEven = {0.20, 0.02, 0.07, 0.90},
+    hordeOdd = {0.20, 0.02, 0.07, 0.90},
+    unknown = {0.11, 0.11, 0.11, 0.86},
+    totals = {0.26, 0.20, 0.07, 0.92},
+    summary = {0.17, 0.13, 0.06, 0.88},
+    header = {0.16, 0.13, 0.05, 0.95},
+    section = {0.12, 0.10, 0.06, 0.84}
 }
 
 local DETAIL_TEXT_COLORS = {
-    default = {0.90, 0.92, 0.96},
-    header = {1.0, 1.0, 0.72},
-    totals = {1.0, 1.0, 0.85},
-    section = {0.78, 0.78, 0.82},
-    unknown = {0.82, 0.82, 0.82}
+    default = {0.94, 0.94, 0.94},
+    header = {1.0, 0.93, 0.62},
+    totals = {1.0, 0.94, 0.70},
+    section = {0.86, 0.84, 0.75},
+    unknown = {0.78, 0.78, 0.78},
+    alliance = {0.0, 0.64, 0.85},
+    horde = {0.95, 0.20, 0.24},
+    self = {0.98, 0.98, 1.0}
 }
 
-local DIVIDER_COLOR_DEFAULT = {0.25, 0.25, 0.32, 0.55}
-local DIVIDER_COLOR_HEADER = {0.30, 0.30, 0.38, 0.70}
+local DIVIDER_COLOR_DEFAULT = {0.33, 0.28, 0.16, 0.58}
+local DIVIDER_COLOR_HEADER = {0.56, 0.45, 0.18, 0.74}
+local DETAIL_NAME_ICON_SIZE = 16
+local DETAIL_NAME_ICON_TEXT_GAP = 5
+local DETAIL_NAME_ICON_TEXCOORD = {0.07, 0.93, 0.07, 0.93}
+local SPEC_ICON_FALLBACK = "Interface\\Icons\\INV_Misc_QuestionMark"
+local CLASS_ICONS_TEXTURE = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES"
+
+local specIconCacheBuilt = false
+local classTokenByKey = {}
+local specIconByClassToken = {}
+
+local ENGLISH_CLASS_TOKEN_BY_KEY = {
+    WARRIOR = "WARRIOR",
+    PALADIN = "PALADIN",
+    HUNTER = "HUNTER",
+    ROGUE = "ROGUE",
+    PRIEST = "PRIEST",
+    DEATHKNIGHT = "DEATHKNIGHT",
+    SHAMAN = "SHAMAN",
+    MAGE = "MAGE",
+    WARLOCK = "WARLOCK",
+    MONK = "MONK",
+    DRUID = "DRUID",
+    DEMONHUNTER = "DEMONHUNTER",
+    EVOKER = "EVOKER",
+}
+
+local function NormalizeLookupKey(value)
+    return tostring(value or ""):upper():gsub("[%s%p_]", "")
+end
+
+local function BuildSpecIconCache()
+    if specIconCacheBuilt then
+        return
+    end
+    specIconCacheBuilt = true
+
+    if type(GetNumClasses) ~= "function" or type(GetClassInfo) ~= "function" then
+        return
+    end
+
+    local classCount = GetNumClasses() or 0
+    for classIndex = 1, classCount do
+        local className, classToken, classID = GetClassInfo(classIndex)
+        local classIdentifier = classID or classIndex
+        if classToken and classToken ~= "" then
+            classTokenByKey[NormalizeLookupKey(classToken)] = classToken
+            classTokenByKey[NormalizeLookupKey(className)] = classToken
+
+            if LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[classToken] then
+                classTokenByKey[NormalizeLookupKey(LOCALIZED_CLASS_NAMES_MALE[classToken])] = classToken
+            end
+            if LOCALIZED_CLASS_NAMES_FEMALE and LOCALIZED_CLASS_NAMES_FEMALE[classToken] then
+                classTokenByKey[NormalizeLookupKey(LOCALIZED_CLASS_NAMES_FEMALE[classToken])] = classToken
+            end
+
+            specIconByClassToken[classToken] = specIconByClassToken[classToken] or {}
+            if classIdentifier
+                and type(GetNumSpecializationsForClassID) == "function"
+                and type(GetSpecializationInfoForClassID) == "function"
+            then
+                local specCount = GetNumSpecializationsForClassID(classIdentifier) or 0
+                for specIndex = 1, specCount do
+                    local _, specName, _, iconTexture = GetSpecializationInfoForClassID(classIdentifier, specIndex)
+                    if specName and specName ~= "" and iconTexture then
+                        specIconByClassToken[classToken][NormalizeLookupKey(specName)] = iconTexture
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function ResolveClassToken(className)
+    BuildSpecIconCache()
+    local key = NormalizeLookupKey(className)
+    return classTokenByKey[key] or ENGLISH_CLASS_TOKEN_BY_KEY[key]
+end
+
+local function ResolveSpecOrClassIcon(className, specName)
+    local classToken = ResolveClassToken(className)
+    local specKey = NormalizeLookupKey(specName)
+
+    if classToken and specKey ~= "" then
+        local iconTexture = specIconByClassToken[classToken] and specIconByClassToken[classToken][specKey]
+        if iconTexture then
+            return iconTexture
+        end
+    end
+
+    if classToken and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classToken] then
+        local coords = CLASS_ICON_TCOORDS[classToken]
+        return CLASS_ICONS_TEXTURE, coords[1], coords[2], coords[3], coords[4]
+    end
+
+    return SPEC_ICON_FALLBACK, unpack(DETAIL_NAME_ICON_TEXCOORD)
+end
+
+local function GetFactionStyleKey(faction)
+    local normalized = tostring(faction or ""):lower()
+    if normalized == "1" or normalized:find("alliance", 1, true) then
+        return "alliance"
+    elseif normalized == "0" or normalized:find("horde", 1, true) then
+        return "horde"
+    end
+    return "neutral"
+end
+
+local function GetFactionDisplayColor(faction)
+    local key = GetFactionStyleKey(faction)
+    if key == "alliance" then
+        return unpack(DETAIL_TEXT_COLORS.alliance)
+    elseif key == "horde" then
+        return unpack(DETAIL_TEXT_COLORS.horde)
+    end
+    return unpack(DETAIL_TEXT_COLORS.default)
+end
+
+local function GetDetailRowTextColor(faction, isSelfRow)
+    if isSelfRow then
+        return unpack(DETAIL_TEXT_COLORS.self)
+    end
+    return GetFactionDisplayColor(faction)
+end
+
+local function SetDetailRowRule(line, factionStyleKey, isSelfRow)
+    if not line then return end
+    if not line.rowRule then
+        line.rowRule = line:CreateTexture(nil, "BORDER")
+        line.rowRule:SetPoint("BOTTOMLEFT", DETAIL_LEFT_PADDING - 2, 0)
+        line.rowRule:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 2, 0)
+        line.rowRule:SetHeight(1)
+    end
+
+    if factionStyleKey == "alliance" then
+        if isSelfRow then
+            line.rowRule:SetColorTexture(0.86, 0.92, 1.0, 0.95)
+        else
+            line.rowRule:SetColorTexture(0.28, 0.52, 0.92, 0.72)
+        end
+    elseif factionStyleKey == "horde" then
+        if isSelfRow then
+            line.rowRule:SetColorTexture(1.0, 0.88, 0.88, 0.95)
+        else
+            line.rowRule:SetColorTexture(0.84, 0.22, 0.18, 0.72)
+        end
+    else
+        line.rowRule:SetColorTexture(0.45, 0.38, 0.18, 0.55)
+    end
+    line.rowRule:Show()
+end
+
+local function ColorizeWinnerText(winner)
+    local text = tostring(winner or "Unknown")
+    local key = GetFactionStyleKey(text)
+    if key == "alliance" then
+        return "|cff74B9FF" .. text .. "|r"
+    elseif key == "horde" then
+        return "|cffFF7666" .. text .. "|r"
+    end
+    return "|cffE6E6E6" .. text .. "|r"
+end
 
 local function GetSortableValue(row, field)
     if not row or not SORTABLE_FIELDS[field] then
@@ -2761,12 +3150,61 @@ local function SetDetailSort(field)
     end
 end
 
+local function GetHeaderFieldAtCursor(header)
+    if not header then return nil end
+
+    local x, y = GetCursorPosition()
+    local scale = header:GetEffectiveScale()
+    x = x / scale
+    y = y / scale
+
+    for _, columnName in ipairs(COLUMN_ORDER) do
+        if SORTABLE_FIELDS[columnName] then
+            local columnFS = header.columns[columnName]
+            local left = columnFS and columnFS:GetLeft()
+            local right = columnFS and columnFS:GetRight()
+            local top = columnFS and columnFS:GetTop()
+            local bottom = columnFS and columnFS:GetBottom()
+            if left and right and top and bottom and x >= left and x <= right and y >= bottom and y <= top then
+                return columnName
+            end
+        end
+    end
+    return nil
+end
+
+local function UpdateDetailHeaderTooltip(header)
+    if not header then return end
+    local hoveredField = GetHeaderFieldAtCursor(header)
+
+    if hoveredField == header.activeTooltipField then
+        return
+    end
+
+    if header.activeTooltipField then
+        GameTooltip:Hide()
+        header.activeTooltipField = nil
+    end
+
+    if hoveredField and DETAIL_OBJECTIVE_KEY_BY_FIELD[hoveredField] then
+        local tooltipTitle = tostring(COLUMN_HEADERS[hoveredField] or "Objective")
+        local tooltipBody = tostring(DETAIL_OBJECTIVE_TOOLTIP_BY_FIELD[hoveredField] or tooltipTitle)
+        GameTooltip:SetOwner(header, "ANCHOR_CURSOR_RIGHT")
+        GameTooltip:SetText(tooltipTitle, 1, 0.93, 0.62)
+        if tooltipBody ~= tooltipTitle then
+            GameTooltip:AddLine(tooltipBody, 0.9, 0.9, 0.9, true)
+        end
+        GameTooltip:Show()
+        header.activeTooltipField = hoveredField
+    end
+end
+
 local function StyleDetailLine(line, options)
     options = options or {}
 
     local showDividers = options.showDividers
     if showDividers == nil then
-        showDividers = true
+        showDividers = false
     end
 
     local style = options.style
@@ -2780,11 +3218,18 @@ local function StyleDetailLine(line, options)
     elseif line.background then
         line.background:Hide()
     end
-
     local textColorKey = options.textColor or "default"
     local textColor = DETAIL_TEXT_COLORS[textColorKey] or DETAIL_TEXT_COLORS.default
     for _, columnName in ipairs(COLUMN_ORDER) do
         line.columns[columnName]:SetTextColor(unpack(textColor))
+    end
+    if line.specIcon then
+        line.specIcon:Hide()
+        line.specIcon:SetTexture(nil)
+        line.specIcon:SetTexCoord(unpack(DETAIL_NAME_ICON_TEXCOORD))
+    end
+    if line.rowRule then
+        line.rowRule:Hide()
     end
 
     if line.columnDividers then
@@ -2803,7 +3248,7 @@ end
 local function MakeDetailLine(parent, i)
     local lineFrame = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     lineFrame:SetPoint("TOPLEFT", 0, -((i-1) * (LINE_HEIGHT + ROW_PADDING_Y)))
-    lineFrame:SetSize(DETAIL_CONTENT_WIDTH + DETAIL_LEFT_PADDING * 2, LINE_HEIGHT + ROW_PADDING_Y)
+    lineFrame:SetSize(DETAIL_CONTENT_WIDTH, LINE_HEIGHT + ROW_PADDING_Y)
     
     if i == 1 then
         lineFrame.leftDivider = lineFrame:CreateTexture(nil, "BACKGROUND")
@@ -2819,9 +3264,15 @@ local function MakeDetailLine(parent, i)
     for index, columnName in ipairs(COLUMN_ORDER) do
         local xPos = COLUMN_POSITIONS[columnName]
         local fontString = lineFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        fontString:SetPoint("TOPLEFT", xPos, -ROW_PADDING_Y * 0.5)
-        fontString:SetSize(COLUMN_WIDTHS[columnName], LINE_HEIGHT)
-        fontString:SetFont("Fonts\\ARIALN.TTF", 12, "")
+        if columnName == "name" then
+            local nameOffset = DETAIL_NAME_ICON_SIZE + DETAIL_NAME_ICON_TEXT_GAP
+            fontString:SetPoint("TOPLEFT", xPos + nameOffset, -ROW_PADDING_Y * 0.5)
+            fontString:SetSize(COLUMN_WIDTHS[columnName] - nameOffset, LINE_HEIGHT)
+        else
+            fontString:SetPoint("TOPLEFT", xPos, -ROW_PADDING_Y * 0.5)
+            fontString:SetSize(COLUMN_WIDTHS[columnName], LINE_HEIGHT)
+        end
+        fontString:SetFont("Fonts\\FRIZQT__.TTF", 11, "")
         fontString:SetJustifyH(COLUMN_ALIGNMENT[columnName] or "CENTER")
         fontString:SetJustifyV("MIDDLE")
         fontString:SetWordWrap(false)
@@ -2841,6 +3292,18 @@ local function MakeDetailLine(parent, i)
     if lineFrame.leftDivider then
         table.insert(lineFrame.columnDividers, 1, lineFrame.leftDivider)
     end
+
+    lineFrame.specIcon = lineFrame:CreateTexture(nil, "ARTWORK")
+    lineFrame.specIcon:SetSize(DETAIL_NAME_ICON_SIZE, DETAIL_NAME_ICON_SIZE)
+    lineFrame.specIcon:SetPoint(
+        "CENTER",
+        lineFrame,
+        "TOPLEFT",
+        COLUMN_POSITIONS.name + (DETAIL_NAME_ICON_SIZE * 0.5) + 1,
+        -((LINE_HEIGHT + ROW_PADDING_Y) * 0.5)
+    )
+    lineFrame.specIcon:SetTexCoord(unpack(DETAIL_NAME_ICON_TEXCOORD))
+    lineFrame.specIcon:Hide()
 
     lineFrame.columns = columns
     DetailLines[i] = lineFrame
@@ -2924,6 +3387,9 @@ function ShowList()
 	UpdateStatBar()
     
     WINDOW.detailScroll:Hide()
+    if WINDOW.detailBackdrop then
+        WINDOW.detailBackdrop:Hide()
+    end
     WINDOW.backBtn:Hide()
     WINDOW.listScroll:Show()
 	WINDOW.currentEntries = nil
@@ -3042,6 +3508,9 @@ function ShowDetail(key)
     
     WINDOW.listScroll:Hide()
     WINDOW.detailScroll:Show()
+    if WINDOW.detailBackdrop then
+        WINDOW.detailBackdrop:Show()
+    end
     WINDOW.backBtn:Show()
     if WINDOW.exportBtn then WINDOW.exportBtn:Show() end
     
@@ -3098,32 +3567,45 @@ function ShowDetail(key)
                 column:SetText("")
             end
         end
+        if line.specIcon then
+            line.specIcon:Hide()
+        end
         line:Show()
-        WINDOW.detailContent:SetHeight(LINE_HEIGHT)
+        WINDOW.detailContent:SetHeight(LINE_HEIGHT + ROW_PADDING_Y)
         return
     end
     
     local data = BGLoggerDB[key]
+    local recorderKeyLookup = {}
+    for _, recorderKey in ipairs(GetRecorderKeys(data)) do
+        recorderKeyLookup[NormalizeKey(recorderKey)] = true
+    end
+    local mapInfo = C_Map.GetMapInfo(data.mapID or 0)
+    local mapName = data.battlegroundName or ((mapInfo and mapInfo.name) or "Unknown Map")
+
+    ConfigureDetailColumnsForLog(data, mapName)
     
     local headerInfo = DetailLines[1] or MakeDetailLine(WINDOW.detailContent, 1)
     StyleDetailLine(headerInfo, { style = "header", textColor = "header", dividerColor = DIVIDER_COLOR_HEADER })
-    local mapInfo = C_Map.GetMapInfo(data.mapID or 0)
-    local mapName = (mapInfo and mapInfo.name) or "Unknown Map"
     
-    local bgInfo = string.format("Battleground: %s | Duration: %s | Winner: %s | Type: %s",
+    local durationText = data.duration and (math.floor(data.duration / 60) .. ":" .. string.format("%02d", data.duration % 60)) or "Unknown"
+    local winnerText = ColorizeWinnerText(data.winner or "Unknown")
+    local bgType = tostring(data.type or "Unknown")
+    local bgInfo = string.format(
+        "Battleground: |cffE6D7AE%s|r   Duration: |cffF2F2F2%s|r   Winner: %s   Type: |cffE6D7AE%s|r",
         mapName,
-        data.duration and (math.floor(data.duration / 60) .. ":" .. string.format("%02d", data.duration % 60)) or "Unknown",
-        data.winner or "Unknown",
-        data.type or "Unknown"
+        durationText,
+        winnerText,
+        bgType
     )
     
     if data.joinedInProgress then
-        bgInfo = bgInfo .. " | ⚠️ JOINED IN-PROGRESS"
+        bgInfo = bgInfo .. "   |cffffb84fJOINED IN-PROGRESS|r"
     end
     
     if not headerInfo.fullWidthText then
         headerInfo.fullWidthText = headerInfo:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        headerInfo.fullWidthText:SetFont("Fonts\\ARIALN.TTF", 12, "")
+        headerInfo.fullWidthText:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
         headerInfo.fullWidthText:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING, -ROW_PADDING_Y * 0.5)
         headerInfo.fullWidthText:SetPoint("TOPRIGHT", -DETAIL_LEFT_PADDING, -ROW_PADDING_Y * 0.5)
         headerInfo.fullWidthText:SetHeight(LINE_HEIGHT)
@@ -3146,10 +3628,10 @@ function ShowDetail(key)
     headerInfo:Show()
     
     local separator1 = DetailLines[2] or MakeDetailLine(WINDOW.detailContent, 2)
-    StyleDetailLine(separator1, { showDividers = false })
+    StyleDetailLine(separator1, { style = "section", showDividers = false })
     if not separator1.dividerTexture then
         separator1.dividerTexture = separator1:CreateTexture(nil, "BACKGROUND")
-        separator1.dividerTexture:SetColorTexture(0.35, 0.35, 0.45, 0.85)
+        separator1.dividerTexture:SetColorTexture(0.55, 0.43, 0.16, 0.75)
         separator1.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
         separator1.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
     end
@@ -3161,13 +3643,18 @@ function ShowDetail(key)
     
     local header = DetailLines[3] or MakeDetailLine(WINDOW.detailContent, 3)
     StyleDetailLine(header, { style = "header", textColor = "header", dividerColor = DIVIDER_COLOR_HEADER })
+    header:EnableMouse(true)
 
     for _, columnName in ipairs(COLUMN_ORDER) do
-        local label = COLUMN_HEADERS[columnName]
+        local label = COLUMN_HEADERS[columnName] or ""
+        local isObjectiveColumn = DETAIL_OBJECTIVE_KEY_BY_FIELD[columnName] ~= nil
+        header.columns[columnName]:SetWordWrap(isObjectiveColumn)
+        header.columns[columnName]:SetJustifyV("MIDDLE")
+        header.columns[columnName]:SetFont("Fonts\\FRIZQT__.TTF", isObjectiveColumn and 10 or 11, "")
         if SORTABLE_FIELDS[columnName] then
             local arrow = ""
             if WINDOW.detailSortField == columnName then
-                arrow = WINDOW.detailSortDirection == "asc" and " ▲" or " ▼"
+                arrow = WINDOW.detailSortDirection == "asc" and " [^]" or " [v]"
             end
             header.columns[columnName]:SetText(label .. arrow)
             header.columns[columnName]:SetJustifyH("CENTER")
@@ -3180,39 +3667,40 @@ function ShowDetail(key)
 
     header:SetScript("OnMouseUp", function(self, button)
         if button ~= "LeftButton" then return end
-        local x, y = GetCursorPosition()
-        local scale = self:GetEffectiveScale()
-        x = x / scale
-        y = y / scale
-
-        local clickedField = nil
-        for _, columnName in ipairs(COLUMN_ORDER) do
-            if SORTABLE_FIELDS[columnName] then
-                local columnFS = header.columns[columnName]
-                local left = columnFS:GetLeft()
-                local right = columnFS:GetRight()
-                local top = columnFS:GetTop()
-                local bottom = columnFS:GetBottom()
-                if x >= left and x <= right and y >= bottom and y <= top then
-                    clickedField = columnName
-                    break
-                end
-            end
-        end
-
+        local clickedField = GetHeaderFieldAtCursor(self)
         if clickedField then
             PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
             SetDetailSort(clickedField)
+        end
+    end)
+    header:SetScript("OnEnter", function(self)
+        self:SetScript("OnUpdate", function(frame)
+            UpdateDetailHeaderTooltip(frame)
+        end)
+        UpdateDetailHeaderTooltip(self)
+    end)
+    header:SetScript("OnLeave", function(self)
+        self:SetScript("OnUpdate", nil)
+        if self.activeTooltipField then
+            GameTooltip:Hide()
+            self.activeTooltipField = nil
+        end
+    end)
+    header:SetScript("OnHide", function(self)
+        self:SetScript("OnUpdate", nil)
+        if self.activeTooltipField then
+            GameTooltip:Hide()
+            self.activeTooltipField = nil
         end
     end)
 
     header:Show()
     
     local separator2 = DetailLines[4] or MakeDetailLine(WINDOW.detailContent, 4)
-    StyleDetailLine(separator2, { showDividers = false })
+    StyleDetailLine(separator2, { style = "section", showDividers = false })
     if not separator2.dividerTexture then
         separator2.dividerTexture = separator2:CreateTexture(nil, "BACKGROUND")
-        separator2.dividerTexture:SetColorTexture(0.28, 0.28, 0.34, 0.75)
+        separator2.dividerTexture:SetColorTexture(0.42, 0.33, 0.12, 0.68)
         separator2.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
         separator2.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
     end
@@ -3254,8 +3742,13 @@ function ShowDetail(key)
     for i, row in ipairs(regularPlayers) do
         local line = DetailLines[i+4] or MakeDetailLine(WINDOW.detailContent, i+4)
         local participationUnknown = row.participationUnknown or false
+        local factionStyleKey = GetFactionStyleKey(row.faction or row.side)
         local styleKey
-        if participationUnknown then
+        if factionStyleKey == "alliance" then
+            styleKey = (i % 2 == 0) and "allianceEven" or "allianceOdd"
+        elseif factionStyleKey == "horde" then
+            styleKey = (i % 2 == 0) and "hordeEven" or "hordeOdd"
+        elseif participationUnknown then
             styleKey = "unknown"
         else
             styleKey = (i % 2 == 0) and "even" or "odd"
@@ -3266,38 +3759,73 @@ function ShowDetail(key)
         local kills = row.kills or row.killingBlows or row.kb or 0
         local deaths = row.deaths or 0
         local honorableKills = row.honorableKills or row.honorKills or 0
-        local objectives = row.objectives or 0
         local realm = row.realm or "Unknown"
         local class = row.class or "Unknown"
         local spec = row.spec or "Unknown"
         local faction = row.faction or row.side or "Unknown"
+        local rowKey = GetPlayerKey(row.name or "Unknown", NormalizeRealmName(realm or ""))
+        local isSelfRow = recorderKeyLookup[NormalizeKey(rowKey)] == true
         
         local damageText = damage >= 1000000 and string.format("%.1fM", damage/1000000) or 
                           damage >= 1000 and string.format("%.0fK", damage/1000) or tostring(damage)
         local healingText = healing >= 1000000 and string.format("%.1fM", healing/1000000) or 
                            healing >= 1000 and string.format("%.0fK", healing/1000) or tostring(healing)
         
-        line.columns.name:SetText(row.name or "Unknown")
-        line.columns.realm:SetText(realm)
-        line.columns.class:SetText(class)
+        local displayName = row.name or "Unknown"
+        if realm and realm ~= "" and realm ~= "Unknown" and realm ~= "Unknown-Realm" then
+            displayName = string.format("%s-%s", displayName, realm)
+        end
+        line.columns.name:SetText(displayName)
         line.columns.spec:SetText(spec)
         line.columns.faction:SetText(faction)
         line.columns.damage:SetText(damageText)
         line.columns.healing:SetText(healingText)
         line.columns.kills:SetText(tostring(kills))
         line.columns.deaths:SetText(tostring(deaths))
-        line.columns.objectives:SetText(tostring(objectives))
         line.columns.hk:SetText(tostring(honorableKills))
+        for _, objectiveColumn in ipairs(DETAIL_OBJECTIVE_COLUMNS) do
+            local objectiveValue = 0
+            if type(row.objectiveBreakdown) == "table" then
+                objectiveValue = tonumber(row.objectiveBreakdown[objectiveColumn.key]) or 0
+            end
+            if objectiveColumn.key == "objectives" and objectiveValue == 0 then
+                objectiveValue = tonumber(row.objectives) or 0
+            end
+            line.columns[objectiveColumn.field]:SetText(tostring(objectiveValue))
+        end
             
         StyleDetailLine(line, { style = styleKey, textColor = participationUnknown and "unknown" or "default" })
+        local textR, textG, textB
+        if factionStyleKey == "neutral" and participationUnknown then
+            textR, textG, textB = unpack(DETAIL_TEXT_COLORS.unknown)
+        else
+            textR, textG, textB = GetDetailRowTextColor(faction, isSelfRow)
+        end
+        for _, columnName in ipairs(COLUMN_ORDER) do
+            line.columns[columnName]:SetTextColor(textR, textG, textB)
+        end
+        SetDetailRowRule(line, factionStyleKey, isSelfRow)
+
+        local iconTexture, left, right, top, bottom = ResolveSpecOrClassIcon(class, spec)
+        if line.specIcon then
+            line.specIcon:SetTexture(iconTexture or SPEC_ICON_FALLBACK)
+            if left and right and top and bottom then
+                line.specIcon:SetTexCoord(left, right, top, bottom)
+            else
+                line.specIcon:SetTexCoord(unpack(DETAIL_NAME_ICON_TEXCOORD))
+            end
+            line.specIcon:Show()
+        end
+
+        line.columns.name:SetFont("Fonts\\FRIZQT__.TTF", 11, "")
         line:Show()
     end
     
-    local summaryLine = DetailLines[#regularPlayers+6] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+6)
-    StyleDetailLine(summaryLine, { showDividers = false })
+    local summaryLine = DetailLines[#regularPlayers+5] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+5)
+    StyleDetailLine(summaryLine, { style = "summary", showDividers = false })
     if not summaryLine.dividerTexture then
         summaryLine.dividerTexture = summaryLine:CreateTexture(nil, "BACKGROUND")
-        summaryLine.dividerTexture:SetColorTexture(0.24, 0.24, 0.30, 0.75)
+        summaryLine.dividerTexture:SetColorTexture(0.40, 0.31, 0.12, 0.66)
         summaryLine.dividerTexture:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 4, -ROW_PADDING_Y)
         summaryLine.dividerTexture:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 4, ROW_PADDING_Y)
     end
@@ -3307,14 +3835,25 @@ function ShowDetail(key)
     end
     summaryLine:Show()
 
-    local totalLine = DetailLines[#regularPlayers+7] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+7)
+    local totalLine = DetailLines[#regularPlayers+6] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+6)
     local totalDamage, totalHealing, totalKills, totalDeaths = 0, 0, 0, 0
+    local objectiveTotals = {}
     
     for _, row in ipairs(regularPlayers) do
         totalDamage = totalDamage + (row.damage or row.dmg or 0)
         totalHealing = totalHealing + (row.healing or row.heal or 0)
         totalKills = totalKills + (row.kills or row.killingBlows or row.kb or 0)
         totalDeaths = totalDeaths + (row.deaths or 0)
+        for _, objectiveColumn in ipairs(DETAIL_OBJECTIVE_COLUMNS) do
+            local objectiveValue = 0
+            if type(row.objectiveBreakdown) == "table" then
+                objectiveValue = tonumber(row.objectiveBreakdown[objectiveColumn.key]) or 0
+            end
+            if objectiveColumn.key == "objectives" and objectiveValue == 0 then
+                objectiveValue = tonumber(row.objectives) or 0
+            end
+            objectiveTotals[objectiveColumn.field] = (objectiveTotals[objectiveColumn.field] or 0) + objectiveValue
+        end
     end
     
     local totalDamageText = totalDamage >= 1000000 and string.format("%.1fM", totalDamage/1000000) or 
@@ -3323,21 +3862,22 @@ function ShowDetail(key)
                             totalHealing >= 1000 and string.format("%.0fK", totalHealing/1000) or tostring(totalHealing)
     
     totalLine.columns.name:SetText("TOTALS (" .. #regularPlayers .. " players)")
-    totalLine.columns.realm:SetText("")
-    totalLine.columns.class:SetText("")
     totalLine.columns.spec:SetText("")
     totalLine.columns.faction:SetText("")
     totalLine.columns.damage:SetText(totalDamageText)
     totalLine.columns.healing:SetText(totalHealingText)
     totalLine.columns.kills:SetText(tostring(totalKills))
     totalLine.columns.deaths:SetText(tostring(totalDeaths))
-    totalLine.columns.objectives:SetText("")
     totalLine.columns.hk:SetText("")
+    for _, objectiveColumn in ipairs(DETAIL_OBJECTIVE_COLUMNS) do
+        local totalObjectiveValue = objectiveTotals[objectiveColumn.field] or 0
+        totalLine.columns[objectiveColumn.field]:SetText(tostring(totalObjectiveValue))
+    end
     
     StyleDetailLine(totalLine, { style = "totals", textColor = "totals" })
     totalLine:Show()
     
-    local currentLineIndex = #regularPlayers + 8
+    local currentLineIndex = #regularPlayers + 7
     
     for i = currentLineIndex, #DetailLines do
         if DetailLines[i] then
@@ -3345,7 +3885,7 @@ function ShowDetail(key)
         end
     end
 
-    WINDOW.detailContent:SetHeight(math.max((currentLineIndex-1)*LINE_HEIGHT, 10))
+    WINDOW.detailContent:SetHeight(math.max((currentLineIndex-1)*(LINE_HEIGHT + ROW_PADDING_Y), 10))
 end
 
 ---------------------------------------------------------------------
@@ -3550,6 +4090,19 @@ local function CreateWindow()
     detailScroll:SetPoint("TOPLEFT", statBar, "BOTTOMLEFT", 0, -10)
     detailScroll:SetPoint("BOTTOMRIGHT", -30, 20)
     detailScroll:Hide()
+    local detailBackdrop = CreateFrame("Frame", nil, f, "BackdropTemplate")
+    detailBackdrop:SetPoint("TOPLEFT", detailScroll, "TOPLEFT", -2, 2)
+    detailBackdrop:SetPoint("BOTTOMRIGHT", detailScroll, "BOTTOMRIGHT", 2, -2)
+    detailBackdrop:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = false, edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 }
+    })
+    detailBackdrop:SetBackdropColor(0.02, 0.02, 0.04, 0.88)
+    detailBackdrop:SetBackdropBorderColor(0.45, 0.35, 0.12, 0.88)
+    detailBackdrop:SetFrameLevel(math.max(0, detailScroll:GetFrameLevel() - 1))
+    detailBackdrop:Hide()
     
     local detailContent = CreateFrame("Frame", nil, detailScroll)
     detailContent:SetSize(detailScroll:GetWidth() - 16, 10)
@@ -3559,6 +4112,7 @@ local function CreateWindow()
     f.listContent = listContent
     f.detailScroll = detailScroll
     f.detailContent = detailContent
+    f.detailBackdrop = detailBackdrop
     f.currentView = "list"
     
     f:Hide()
