@@ -2,21 +2,36 @@ BGLoggerDB = BGLoggerDB or {}
 BGLoggerSession = BGLoggerSession or {}
 BGLoggerAccountChars = BGLoggerAccountChars or {}
 BGLoggerCharStats = BGLoggerCharStats or {}
+BGLoggerConfig = BGLoggerConfig or {}
 
 ---------------------------------------------------------------------
 -- globals
 ---------------------------------------------------------------------
 local IsEpicBattleground
+local FALLBACK_ADDON_VERSION = "v1.0.0"
 
 local function GetAddonVersion()
+	local function NormalizeAddonVersion(version)
+		version = tostring(version or ""):match("^%s*(.-)%s*$")
+		if version == "" or version == "@project-version@" then
+			return nil
+		end
+		return version
+	end
 	-- Prefer modern API, fall back to legacy.
 	if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
-		return C_AddOns.GetAddOnMetadata("BGLogger", "Version")
+		local version = NormalizeAddonVersion(C_AddOns.GetAddOnMetadata("BGLogger", "Version"))
+		if version then
+			return version
+		end
 	end
 	if type(GetAddOnMetadata) == "function" then
-		return GetAddOnMetadata("BGLogger", "Version")
+		local version = NormalizeAddonVersion(GetAddOnMetadata("BGLogger", "Version"))
+		if version then
+			return version
+		end
 	end
-	return nil
+	return FALLBACK_ADDON_VERSION
 end
 
 local ADDON_VERSION = tostring(GetAddonVersion() or "Unknown")
@@ -37,9 +52,14 @@ local bgStartTime            = 0
 local MIN_BG_TIME            = 30
 local saveInProgress         = false
 local pendingRefresh         = false
+local filterDropdownsDirty   = true
 
-local CURRENT_SEASON         = "mntpp"
+local CURRENT_SEASON         = "MS1"
+local LEGACY_DEFAULT_SEASON  = "mntpp"
 local UNKNOWN_SEASON         = "Unspecified"
+local INFO_POPUP_MESSAGE_KEY = "2026-03-first-open-message"
+local INFO_POPUP_TITLE       = "BGLogger 1.0"
+local INFO_POPUP_BODY_TEXT   = [[Welcome to BGLogger! An imporant note: each recorded log only takes up a small amount of space itself, but as you accumulate many logs they will eventually add up. We recommend uploading your logs to BGLogger.com as their permanent home, and deleting old logs periodically to keep memory usage down. Deleting logs will not affect your stats in the stat panel.]]
 
 local filterState = {
 	seasons = { [CURRENT_SEASON] = true },
@@ -73,6 +93,7 @@ local function ToggleFilterValue(filterSet, value)
 	else
 		filterSet[value] = true
 	end
+	filterDropdownsDirty = true
 end
 
 local function ResetFilters()
@@ -81,6 +102,7 @@ local function ResetFilters()
 	wipe(filterState.characters)
 	wipe(filterState.bgCategories)
 	wipe(filterState.maps)
+	filterDropdownsDirty = true
 	if BGLoggerSession then
 		BGLoggerSession.filterState = nil
 	end
@@ -139,6 +161,7 @@ local function RestoreFilterState()
 			filterState.maps[k] = v
 		end
 	end
+	filterDropdownsDirty = true
 end
 
 local function HasActiveFilters()
@@ -157,6 +180,32 @@ local BG_CATEGORY_LABELS = {
 	rated = "Rated BGs",
 	blitz = "Rated Blitz",
 }
+
+local function ShouldShowInfoPopup()
+	BGLoggerConfig = BGLoggerConfig or {}
+	return BGLoggerConfig.dismissedInfoPopupKey ~= INFO_POPUP_MESSAGE_KEY
+end
+
+local function DismissInfoPopup(window)
+	if not window or not window.infoPopup then return end
+	if window.infoPopupCheckbox and window.infoPopupCheckbox:GetChecked() then
+		BGLoggerConfig = BGLoggerConfig or {}
+		BGLoggerConfig.dismissedInfoPopupKey = INFO_POPUP_MESSAGE_KEY
+	end
+	window.infoPopup:Hide()
+end
+
+local function ShowInfoPopupIfNeeded(window)
+	if not window or not window.infoPopup then return end
+	if ShouldShowInfoPopup() then
+		if window.infoPopupCheckbox then
+			window.infoPopupCheckbox:SetChecked(false)
+		end
+		window.infoPopup:Show()
+	else
+		window.infoPopup:Hide()
+	end
+end
 
 ----------------------------------------------------------------------
 -- Session Persistence Helpers
@@ -451,13 +500,19 @@ end
 
 local function NormalizeSeason(season)
 	if season == nil or season == "" or season == UNKNOWN_SEASON then
-		return CURRENT_SEASON
+		return LEGACY_DEFAULT_SEASON
 	end
 	
 	local legacyMapping = {
 		["Season 1"] = "tww-s3",
 		["season 1"] = "tww-s3",
 		["S1"] = "tww-s3",
+		["MS1"] = "MS1",
+		["ms1"] = "MS1",
+		["Midnight S1"] = "MS1",
+		["midnight s1"] = "MS1",
+		["Midnight Season 1"] = "MS1",
+		["midnight season 1"] = "MS1",
 		["MNTPP"] = "mntpp",
 		["Midnight Prepatch"] = "mntpp",
 		["midnight prepatch"] = "mntpp",
@@ -928,12 +983,16 @@ end
 
 
 local SEASON_DISPLAY_NAMES = {
+	["MS1"] = "Midnight S1",
+	["ms1"] = "Midnight S1",
+	["Midnight S1"] = "Midnight S1",
+	["Midnight Season 1"] = "Midnight S1",
 	["mntpp"] = "Midnight Prepatch",
 	["MNTPP"] = "Midnight Prepatch",
 	["Midnight Prepatch"] = "Midnight Prepatch",
 	["tww-s3"] = "TWW Season 3",
 	["Season 1"] = "TWW Season 3",
-	["Unspecified"] = "TWW Season 3",
+	["Unspecified"] = "Midnight Prepatch",
 }
 
 local function GetSeasonDisplayName(seasonId)
@@ -993,6 +1052,22 @@ local function GetMapDisplayLabel()
 	end
 end
 
+local function UpdateFilterDropdownLabels()
+	if not WINDOW then return end
+	if WINDOW.seasonDropdown then
+		UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
+	end
+	if WINDOW.characterDropdown then
+		UIDropDownMenu_SetText(WINDOW.characterDropdown, GetCharacterDisplayLabel())
+	end
+	if WINDOW.bgTypeDropdown then
+		UIDropDownMenu_SetText(WINDOW.bgTypeDropdown, GetBgTypeDisplayLabel())
+	end
+	if WINDOW.mapDropdown then
+		UIDropDownMenu_SetText(WINDOW.mapDropdown, GetMapDisplayLabel())
+	end
+end
+
 RefreshSeasonDropdown = function()
 	if not WINDOW or not WINDOW.seasonDropdown then return end
 
@@ -1004,6 +1079,7 @@ RefreshSeasonDropdown = function()
 		info.notCheckable = true
 		info.func = function()
 			wipe(filterState.seasons)
+			filterDropdownsDirty = true
 			UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
 			WINDOW.currentView = "list"
 			ClearAllSelections()
@@ -1020,6 +1096,7 @@ RefreshSeasonDropdown = function()
 		info.func = function()
 			wipe(filterState.seasons)
 			filterState.seasons[CURRENT_SEASON] = true
+			filterDropdownsDirty = true
 			UIDropDownMenu_SetText(WINDOW.seasonDropdown, GetSeasonDisplayLabel())
 			WINDOW.currentView = "list"
 			ClearAllSelections()
@@ -1070,6 +1147,7 @@ RefreshCharacterDropdown = function()
 		info.notCheckable = true
 		info.func = function()
 			wipe(filterState.characters)
+			filterDropdownsDirty = true
 			UIDropDownMenu_SetText(WINDOW.characterDropdown, GetCharacterDisplayLabel())
 			WINDOW.currentView = "list"
 			ClearAllSelections()
@@ -1114,6 +1192,7 @@ RefreshBgTypeDropdown = function()
 		info.notCheckable = true
 		info.func = function()
 			wipe(filterState.bgCategories)
+			filterDropdownsDirty = true
 			UIDropDownMenu_SetText(WINDOW.bgTypeDropdown, GetBgTypeDisplayLabel())
 			WINDOW.currentView = "list"
 			ClearAllSelections()
@@ -1169,6 +1248,7 @@ RefreshMapDropdown = function()
 		info.notCheckable = true
 		info.func = function()
 			wipe(filterState.maps)
+			filterDropdownsDirty = true
 			UIDropDownMenu_SetText(WINDOW.mapDropdown, GetMapDisplayLabel())
 			WINDOW.currentView = "list"
 			ClearAllSelections()
@@ -1209,6 +1289,7 @@ local function RefreshFilterDropdowns()
 	RefreshBgTypeDropdown()
 	RefreshMapDropdown()
 	RefreshCharacterDropdown()
+	filterDropdownsDirty = false
 end
 
 local function PruneInvalidSelections(entries)
@@ -2263,6 +2344,7 @@ local function CommitMatch(list)
             AppendCharStats(selfKey, CURRENT_SEASON, bgCategory, mapName, selfEntry, didWin)
         end
         
+        filterDropdownsDirty = true
         matchSaved = true
         ClearSessionState("match saved")
         StopStatePersistence()
@@ -2924,10 +3006,10 @@ RebuildDetailColumnGeometry()
 local DETAIL_ROW_COLORS = {
     even = {0.06, 0.06, 0.09, 0.86},
     odd = {0.06, 0.06, 0.09, 0.86},
-    allianceEven = {0.04, 0.09, 0.18, 0.90},
-    allianceOdd = {0.04, 0.09, 0.18, 0.90},
-    hordeEven = {0.20, 0.02, 0.07, 0.90},
-    hordeOdd = {0.20, 0.02, 0.07, 0.90},
+    allianceEven = {0.05, 0.10, 0.17, 0.88},
+    allianceOdd = {0.05, 0.10, 0.17, 0.88},
+    hordeEven = {0.18, 0.04, 0.08, 0.88},
+    hordeOdd = {0.18, 0.04, 0.08, 0.88},
     unknown = {0.11, 0.11, 0.11, 0.86},
     totals = {0.26, 0.20, 0.07, 0.92},
     summary = {0.17, 0.13, 0.06, 0.88},
@@ -2941,8 +3023,8 @@ local DETAIL_TEXT_COLORS = {
     totals = {1.0, 0.94, 0.70},
     section = {0.86, 0.84, 0.75},
     unknown = {0.78, 0.78, 0.78},
-    alliance = {0.0, 0.64, 0.85},
-    horde = {0.95, 0.20, 0.24},
+    alliance = {0.14, 0.61, 0.79},
+    horde = {0.88, 0.28, 0.30},
     self = {0.98, 0.98, 1.0}
 }
 
@@ -3072,31 +3154,42 @@ local function GetDetailRowTextColor(faction, isSelfRow)
     return GetFactionDisplayColor(faction)
 end
 
-local function SetDetailRowRule(line, factionStyleKey, isSelfRow)
+local function SetDetailRowRule(line, styleKey)
     if not line then return end
     if not line.rowRule then
         line.rowRule = line:CreateTexture(nil, "BORDER")
-        line.rowRule:SetPoint("BOTTOMLEFT", DETAIL_LEFT_PADDING - 2, 0)
-        line.rowRule:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 2, 0)
+        if type(line.rowRule.SetSnapToPixelGrid) == "function" then
+            line.rowRule:SetSnapToPixelGrid(true)
+        end
+        if type(line.rowRule.SetTexelSnappingBias) == "function" then
+            line.rowRule:SetTexelSnappingBias(0)
+        end
+        line.rowRule:SetPoint("TOPLEFT", DETAIL_LEFT_PADDING - 2, 0)
+        line.rowRule:SetPoint("TOPRIGHT", -DETAIL_LEFT_PADDING + 2, 0)
         line.rowRule:SetHeight(1)
     end
-
-    if factionStyleKey == "alliance" then
-        if isSelfRow then
-            line.rowRule:SetColorTexture(0.86, 0.92, 1.0, 0.95)
-        else
-            line.rowRule:SetColorTexture(0.28, 0.52, 0.92, 0.72)
+    if not line.rowRuleSoft then
+        line.rowRuleSoft = line:CreateTexture(nil, "BORDER")
+        if type(line.rowRuleSoft.SetSnapToPixelGrid) == "function" then
+            line.rowRuleSoft:SetSnapToPixelGrid(true)
         end
-    elseif factionStyleKey == "horde" then
-        if isSelfRow then
-            line.rowRule:SetColorTexture(1.0, 0.88, 0.88, 0.95)
-        else
-            line.rowRule:SetColorTexture(0.84, 0.22, 0.18, 0.72)
+        if type(line.rowRuleSoft.SetTexelSnappingBias) == "function" then
+            line.rowRuleSoft:SetTexelSnappingBias(0)
         end
-    else
-        line.rowRule:SetColorTexture(0.45, 0.38, 0.18, 0.55)
+        line.rowRuleSoft:SetPoint("BOTTOMLEFT", DETAIL_LEFT_PADDING - 2, 0)
+        line.rowRuleSoft:SetPoint("BOTTOMRIGHT", -DETAIL_LEFT_PADDING + 2, 0)
+        line.rowRuleSoft:SetHeight(1)
     end
+    local baseColor = DETAIL_ROW_COLORS[styleKey] or DETAIL_ROW_COLORS.unknown
+    local lighten = 0.18
+    local edgeR = baseColor[1] + (1 - baseColor[1]) * lighten
+    local edgeG = baseColor[2] + (1 - baseColor[2]) * lighten
+    local edgeB = baseColor[3] + (1 - baseColor[3]) * lighten
+    local edgeA = math.min(1, (baseColor[4] or 1) * 0.72)
+    line.rowRule:SetColorTexture(edgeR, edgeG, edgeB, edgeA)
+    line.rowRuleSoft:SetColorTexture(edgeR, edgeG, edgeB, edgeA)
     line.rowRule:Show()
+    line.rowRuleSoft:Show()
 end
 
 local function ColorizeWinnerText(winner)
@@ -3231,6 +3324,9 @@ local function StyleDetailLine(line, options)
     if line.rowRule then
         line.rowRule:Hide()
     end
+    if line.rowRuleSoft then
+        line.rowRuleSoft:Hide()
+    end
 
     if line.columnDividers then
         for _, divider in ipairs(line.columnDividers) do
@@ -3249,7 +3345,6 @@ local function MakeDetailLine(parent, i)
     local lineFrame = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     lineFrame:SetPoint("TOPLEFT", 0, -((i-1) * (LINE_HEIGHT + ROW_PADDING_Y)))
     lineFrame:SetSize(DETAIL_CONTENT_WIDTH, LINE_HEIGHT + ROW_PADDING_Y)
-    
     if i == 1 then
         lineFrame.leftDivider = lineFrame:CreateTexture(nil, "BACKGROUND")
         lineFrame.leftDivider:SetColorTexture(unpack(DIVIDER_COLOR_HEADER))
@@ -3335,6 +3430,17 @@ local function MakeListButton(parent, i)
 		PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
 	end)
 	b.checkbox = checkbox
+	b:SetScript("OnClick", function(self, button)
+		if button == "LeftButton" and IsShiftKeyDown() and self.bgKey then
+			SetLogSelected(self.bgKey, not IsLogSelected(self.bgKey))
+			RefreshListSelectionVisuals()
+			UpdateSelectionToolbar()
+			return
+		end
+		if self.bgKey then
+			ShowDetail(self.bgKey)
+		end
+	end)
 
 	local label = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	label:SetPoint("TOPLEFT", 32, -4)
@@ -3370,7 +3476,11 @@ RefreshWindow = function()
 	
 	SaveFilterState()
 	
-	RefreshFilterDropdowns()
+	if filterDropdownsDirty then
+		RefreshFilterDropdowns()
+	else
+		UpdateFilterDropdownLabels()
+	end
 	UpdateStatBar()
     
     if WINDOW.currentView == "detail" and WINDOW.currentKey then
@@ -3384,7 +3494,6 @@ function ShowList()
     
     WINDOW.currentView = "list"
     WINDOW.currentKey = nil
-	UpdateStatBar()
     
     WINDOW.detailScroll:Hide()
     if WINDOW.detailBackdrop then
@@ -3398,7 +3507,6 @@ function ShowList()
     
     for _, btn in ipairs(ListButtons) do
         btn:Hide()
-        btn:SetScript("OnClick", nil)
     end
     
     local entries = {}
@@ -3467,16 +3575,6 @@ function ShowList()
 			btn:SetText(displayText)
 		end
         btn.bgKey = k
-        
-		btn:SetScript("OnClick", function(self, button) 
-			if button == "LeftButton" and IsShiftKeyDown() and self.bgKey then
-				SetLogSelected(self.bgKey, not IsLogSelected(self.bgKey))
-				RefreshListSelectionVisuals()
-				UpdateSelectionToolbar()
-				return
-			end
-			ShowDetail(self.bgKey) 
-        end)
 		local isSelected = IsLogSelected(k)
 		if btn.checkbox then
 			btn.checkbox:SetChecked(isSelected)
@@ -3804,8 +3902,6 @@ function ShowDetail(key)
         for _, columnName in ipairs(COLUMN_ORDER) do
             line.columns[columnName]:SetTextColor(textR, textG, textB)
         end
-        SetDetailRowRule(line, factionStyleKey, isSelfRow)
-
         local iconTexture, left, right, top, bottom = ResolveSpecOrClassIcon(class, spec)
         if line.specIcon then
             line.specIcon:SetTexture(iconTexture or SPEC_ICON_FALLBACK)
@@ -3819,6 +3915,7 @@ function ShowDetail(key)
 
         line.columns.name:SetFont("Fonts\\FRIZQT__.TTF", 11, "")
         line:Show()
+        SetDetailRowRule(line, styleKey)
     end
     
     local summaryLine = DetailLines[#regularPlayers+5] or MakeDetailLine(WINDOW.detailContent, #regularPlayers+5)
@@ -3919,6 +4016,7 @@ local function CreateWindow()
     
     f:SetScript("OnShow", function(self)
         self:EnableKeyboard(true)
+        ShowInfoPopupIfNeeded(self)
     end)
     
     f:SetScript("OnHide", function(self)
@@ -3931,6 +4029,61 @@ local function CreateWindow()
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -16)
     title:SetText("Battleground Statistics")
+
+	local infoPopup = CreateFrame("Frame", nil, f, "BackdropTemplate")
+	infoPopup:SetAllPoints()
+	infoPopup:SetFrameStrata("DIALOG")
+	infoPopup:SetFrameLevel(f:GetFrameLevel() + 30)
+	infoPopup:EnableMouse(true)
+	infoPopup:SetBackdrop({
+		bgFile = "Interface\\Buttons\\WHITE8x8",
+	})
+	infoPopup:SetBackdropColor(0, 0, 0, 0.6)
+	infoPopup:Hide()
+
+	local infoPanel = CreateFrame("Frame", nil, infoPopup, "BackdropTemplate")
+	infoPanel:SetSize(620, 300)
+	infoPanel:SetPoint("CENTER", 0, 0)
+	infoPanel:SetBackdrop({
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true, tileSize = 32, edgeSize = 32,
+		insets = {left = 8, right = 8, top = 8, bottom = 8}
+	})
+	infoPanel:EnableMouse(true)
+
+	local infoTitle = infoPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	infoTitle:SetPoint("TOP", 0, -18)
+	infoTitle:SetText(INFO_POPUP_TITLE)
+
+	local infoMessage = infoPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	infoMessage:SetPoint("TOPLEFT", 28, -56)
+	infoMessage:SetPoint("BOTTOMRIGHT", -28, 72)
+	infoMessage:SetJustifyH("LEFT")
+	infoMessage:SetJustifyV("TOP")
+	infoMessage:SetText(INFO_POPUP_BODY_TEXT)
+
+	local infoCheckbox = CreateFrame("CheckButton", nil, infoPanel, "UICheckButtonTemplate")
+	infoCheckbox:SetPoint("BOTTOMLEFT", 28, 28)
+	local infoCheckboxLabel = infoPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	infoCheckboxLabel:SetPoint("LEFT", infoCheckbox, "RIGHT", 4, 1)
+	infoCheckboxLabel:SetText("Don't show this message again")
+
+	local infoOkayBtn = CreateFrame("Button", nil, infoPanel, "UIPanelButtonTemplate")
+	infoOkayBtn:SetSize(100, 24)
+	infoOkayBtn:SetPoint("BOTTOMRIGHT", -28, 28)
+	infoOkayBtn:SetText("Okay")
+	infoOkayBtn:SetScript("OnClick", function()
+		DismissInfoPopup(f)
+	end)
+
+	f.infoPopup = infoPopup
+	f.infoPopupPanel = infoPanel
+	f.infoPopupTitle = infoTitle
+	f.infoPopupMessage = infoMessage
+	f.infoPopupCheckbox = infoCheckbox
+	f.infoPopupCheckboxLabel = infoCheckboxLabel
+	f.infoPopupOkayBtn = infoOkayBtn
     
     StaticPopupDialogs["BGLOGGER_DELETE_SELECTED"] = {
         text = "Delete selected logs? This cannot be undone.",
@@ -3943,6 +4096,7 @@ local function CreateWindow()
             for _, key in ipairs(pendingDeleteKeys) do
                 BGLoggerDB[key] = nil
             end
+            filterDropdownsDirty = true
             pendingDeleteKeys = nil
             ClearAllSelections()
             RequestRefreshWindow()

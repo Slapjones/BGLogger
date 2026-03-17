@@ -56,7 +56,7 @@ function TableToJSON(tbl, indent)
 	end
 end
 
-function ShowJSONExportFrame(jsonString, filename)
+function ShowJSONExportFrame(jsonString)
 	
 	if not BGLoggerExportFrame then
 		local f = CreateFrame("Frame", "BGLoggerExportFrame", UIParent, "BackdropTemplate")
@@ -128,12 +128,6 @@ function ShowJSONExportFrame(jsonString, filename)
 			f.editBox:HighlightText()
 		end)
 
-		local filenameText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		filenameText:SetPoint("BOTTOMLEFT", 16, 20)
-		filenameText:SetWidth(500)
-		filenameText:SetJustifyH("LEFT")
-		f.filenameText = filenameText
-		
 		f:Hide()
 		BGLoggerExportFrame = f
 	end
@@ -142,9 +136,7 @@ function ShowJSONExportFrame(jsonString, filename)
 	
 	BGLoggerExportFrame.editBox:SetText(jsonString)
 	BGLoggerExportFrame.editBox:SetCursorPosition(0)
-	
-	BGLoggerExportFrame.filenameText:SetText("Save as: " .. filename)
-	
+
 	local fontHeight = 12
 	local numLines = 1
 	for _ in jsonString:gmatch('\n') do
@@ -153,17 +145,32 @@ function ShowJSONExportFrame(jsonString, filename)
 	BGLoggerExportFrame.editBox:SetHeight(math.max(numLines * fontHeight + 50, 100))
 	
 	BGLoggerExportFrame:Show()
+	BGLoggerExportFrame.editBox:SetFocus()
+	BGLoggerExportFrame.editBox:HighlightText()
 	
 end
 
 local function GetAddonVersion()
+	local function NormalizeAddonVersion(version)
+		version = tostring(version or ""):match("^%s*(.-)%s*$")
+		if version == "" or version == "@project-version@" then
+			return nil
+		end
+		return version
+	end
 	if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
-		return C_AddOns.GetAddOnMetadata("BGLogger", "Version")
+		local version = NormalizeAddonVersion(C_AddOns.GetAddOnMetadata("BGLogger", "Version"))
+		if version then
+			return version
+		end
 	end
 	if type(GetAddOnMetadata) == "function" then
-		return GetAddOnMetadata("BGLogger", "Version")
+		local version = NormalizeAddonVersion(GetAddOnMetadata("BGLogger", "Version"))
+		if version then
+			return version
+		end
 	end
-	return _G.BGLOGGER_ADDON_VERSION
+	return NormalizeAddonVersion(_G.BGLOGGER_ADDON_VERSION) or "v1.0.0"
 end
 
 local function BuildExportObject(key)
@@ -233,7 +240,8 @@ local function BuildExportObject(key)
 		selfPlayer = data.selfPlayer,
 		selfPlayerKey = data.selfPlayerKey,
 		recorder = data.recorder,
-		recorderKey = data.recorderKey
+		recorderKey = data.recorderKey,
+		addonVersion = tostring(GetAddonVersion() or "Unknown")
 	}
 
 	exportData.integrity = exportData.integrity or {}
@@ -272,12 +280,7 @@ function ExportBattleground(key)
 		return
 	end
 
-	local filename = string.format("BGLogger_%s_%s.json", 
-		mapName:gsub("%s+", "_"):gsub("[^%w_]", ""),
-		date("!%Y%m%d_%H%M%S")
-	)
-
-	ShowJSONExportFrame(jsonString, filename)
+	ShowJSONExportFrame(jsonString)
 	print("|cff00ffffBGLogger:|r Exported " .. mapName .. " with verified integrity hash")
 end
 
@@ -310,8 +313,7 @@ function ExportSelectedBattlegrounds(keys)
 		return
 	end
 
-	local filename = string.format("BGLogger_Selected_%s.json", date("!%Y%m%d_%H%M%S"))
-	ShowJSONExportFrame(jsonString, filename)
+	ShowJSONExportFrame(jsonString)
 	print("|cff00ffffBGLogger:|r Exported " .. successCount .. " battlegrounds in a single multi-log export.")
 end
 
@@ -324,38 +326,17 @@ function ExportAllBattlegrounds()
 
 	local exports = {}
 	for _, key in ipairs(keys) do
-		local data = BGLoggerDB[key]
-		if data then
-			local success, json = pcall(function()
-				local original = _G.TableToJSON
-				local mapName = data.battlegroundName or "Unknown Battleground"
-				local exportPlayers = {}
-				for _, p in ipairs(data.stats or {}) do
-					table.insert(exportPlayers, {
-						name = p.name, realm = p.realm,
-						damage = tostring(p.damage or p.dmg or 0),
-						healing = tostring(p.healing or p.heal or 0)
-					})
-				end
-				local obj = {
-					battleground = mapName,
-					date = data.dateISO or date("!%Y-%m-%dT%H:%M:%SZ"),
-					type = data.type or "non-rated",
-					duration = tostring(data.duration or 0),
-					trueDuration = tostring(data.trueDuration or data.duration or 0),
-					winner = data.winner or "",
-					players = exportPlayers,
-					integrity = data.integrity
-				}
-				return TableToJSON(obj)
-			end)
-			if success then table.insert(exports, json) end
+		local exportData = BuildExportObject(key)
+		if exportData then
+			local success, json = pcall(TableToJSON, exportData)
+			if success then
+				table.insert(exports, json)
+			end
 		end
 	end
 
 	local jsonArray = "[\n  " .. table.concat(exports, ",\n  ") .. "\n]"
-	local filename = string.format("BGLogger_All_%s.json", date("!%Y%m%d_%H%M%S"))
-	ShowJSONExportFrame(jsonArray, filename)
+	ShowJSONExportFrame(jsonArray)
 	print("|cff00ffffBGLogger:|r Exported all battlegrounds (" .. tostring(#exports) .. ")")
 end
 
