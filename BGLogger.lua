@@ -54,9 +54,10 @@ local saveInProgress         = false
 local pendingRefresh         = false
 local filterDropdownsDirty   = true
 
-local CURRENT_SEASON         = "MS1"
+local CURRENT_SEASON         = "MS2"
 local LEGACY_DEFAULT_SEASON  = "mntpp"
 local UNKNOWN_SEASON         = "Unspecified"
+local SEASON_RESET_KEY       = "MS2-season-start"
 local INFO_POPUP_MESSAGE_KEY = "2026-03-first-open-message"
 local INFO_POPUP_TITLE       = "BGLogger 1.0"
 local INFO_POPUP_BODY_TEXT   = [[Welcome to BGLogger! An imporant note: each recorded log only takes up a small amount of space itself, but as you accumulate many logs they will eventually add up. We recommend uploading your logs to BGLogger.com as their permanent home, and deleting old logs periodically to keep memory usage down. Deleting logs will not affect your stats in the stat panel.]]
@@ -131,6 +132,12 @@ local function SaveFilterState()
 end
 
 local function RestoreFilterState()
+	BGLoggerConfig = BGLoggerConfig or {}
+	local newSeasonReset = (BGLoggerConfig.seasonFilterResetKey ~= SEASON_RESET_KEY)
+	if newSeasonReset then
+		BGLoggerConfig.seasonFilterResetKey = SEASON_RESET_KEY
+	end
+	
 	if not BGLoggerSession or not BGLoggerSession.filterState then return end
 	local saved = BGLoggerSession.filterState
 	
@@ -139,7 +146,7 @@ local function RestoreFilterState()
 	wipe(filterState.bgCategories)
 	wipe(filterState.maps)
 	
-	if saved.seasons and next(saved.seasons) then
+	if not newSeasonReset and saved.seasons and next(saved.seasons) then
 		for k, v in pairs(saved.seasons) do
 			filterState.seasons[k] = v
 		end
@@ -513,6 +520,12 @@ local function NormalizeSeason(season)
 		["midnight s1"] = "MS1",
 		["Midnight Season 1"] = "MS1",
 		["midnight season 1"] = "MS1",
+		["MS2"] = "MS2",
+		["ms2"] = "MS2",
+		["Midnight S2"] = "MS2",
+		["midnight s2"] = "MS2",
+		["Midnight Season 2"] = "MS2",
+		["midnight season 2"] = "MS2",
 		["MNTPP"] = "mntpp",
 		["Midnight Prepatch"] = "mntpp",
 		["midnight prepatch"] = "mntpp",
@@ -983,6 +996,10 @@ end
 
 
 local SEASON_DISPLAY_NAMES = {
+	["MS2"] = "Midnight S2",
+	["ms2"] = "Midnight S2",
+	["Midnight S2"] = "Midnight S2",
+	["Midnight Season 2"] = "Midnight S2",
 	["MS1"] = "Midnight S1",
 	["ms1"] = "Midnight S1",
 	["Midnight S1"] = "Midnight S1",
